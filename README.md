@@ -16,13 +16,13 @@ the gap — see [Data notes](#data-notes-what-the-dataset-can-and-cant-do).
 
 ## Dataset
 
-**KuaiRand-Pure** (`~/programData/Kuai-Recommendor/KuaiRand-Pure/`) — smallest version,
-laptop-friendly.
+**KuaiRand-Pure** (`data/KuaiRand-Pure/`) — smallest version, laptop-friendly.
 
 | File | Rows | What it is |
 |---|---|---|
-| `log_standard_*_pure.csv` (×2) | ~2.3M | Impression logs from the production recommender (biased) |
-| `log_random_4_22_to_5_08_pure.csv` | 1.19M | **Randomly exposed** impressions — unbiased eval slice |
+| `log_standard_4_08_to_4_21_pure.csv` | 1.14M | Production-recommender impressions (biased), Apr 8–21 |
+| `log_standard_4_22_to_5_08_pure.csv` | 295K | Production-recommender impressions (biased), Apr 22–May 8 |
+| `log_random_4_22_to_5_08_pure.csv` | 1.19M | **Randomly exposed** impressions (unbiased), Apr 22–May 8 |
 | `user_features_pure.csv` | 27K | User demographics/activity + 18 anonymized one-hot feats |
 | `video_features_basic_pure.csv` | 7.6K | `author_id`, upload time, duration, tag, music |
 | `video_features_statistic_pure.csv` | 7.6K | ~50 aggregate engagement counts per video |
@@ -30,6 +30,39 @@ laptop-friendly.
 
 Per-impression labels: `is_click, is_like, is_follow, is_comment, is_forward, is_hate,
 long_view, is_profile_enter` + `play_time_ms` / `duration_ms` (dwell & skip).
+
+### Train / validation / online-prediction split
+
+The biased (standard) and unbiased (random) logs overlap in time for Apr 22–May 8 — this
+parallel collection is by design and drives the split.
+
+```
+          4/08 ─────────── 4/21 │ 4/22 ─────────── 5/08
+standard   [===== train =====]   │ [== val ==]
+ random                          │ [===== test / online =====]
+```
+
+| Role | Data | Why |
+|---|---|---|
+| **Training** | standard 4/08–4/21 (1.14M, biased) | Fit model params on the earlier window; features computed point-in-time |
+| **Validation** | standard 4/22–5/08 (295K, biased) | Model selection / early stopping / loss-weight tuning. Same biased distribution as training → honest measure of the learned task |
+| **Test (unbiased)** | random 4/22–5/08 (1.19M, unbiased) | Headline metric. An unbiased offline eval set for estimating ranking quality of a *new* policy — NOT a simulation of production traffic. Never touched during training/tuning |
+
+Design rules:
+
+- **Split by time, not randomly** — point-in-time features + evolving user behavior mean a
+  random split leaks the future into the past. Train = earlier, val = later.
+- **Val and test share the same period** (Apr 22–May 8), differing only in exposure policy.
+  So `val_AUC − test_AUC` isolates selection/position bias with time held constant
+  (Stage 5). The gap is large by construction: logged CTR is **46%** (biased) vs **17.6%**
+  (random) — the production recommender only shows likely clicks, inflating its CTR.
+- **All three use point-in-time features** from full interaction history up to each
+  impression's timestamp, regardless of which policy generated it — matching what an online
+  store would serve, and keeping offline/online feature definitions consistent.
+- **Negative sampling on training only.** Val/test keep the natural class balance, or the
+  metrics are meaningless.
+- **Cold start is real:** the random log has 27,285 users vs training's 26,210, so val/test
+  contain unseen users/videos → embedding cold-start. A realistic condition, not a bug.
 
 ---
 
