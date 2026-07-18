@@ -4,9 +4,11 @@ from kuai_recommender.data.utils import (
     DATA_DIR,
     VIDEO_FEATURES_BASIC_PATH,
     KuaiPureDatasetSplits,
+    rng,
 )
 import pandas as pd
 import torch
+from math import isclose
 
 
 class KuaiPureData:
@@ -107,13 +109,20 @@ class KuaiPureData:
 
 
 class KuaiPureDataset(Dataset):
-    def __init__(self, kuai_pure_data: KuaiPureData, features):
+    def __init__(
+        self,
+        kuai_pure_data: KuaiPureData,
+        features,
+        neg_keep_frac: float = 1.0,
+    ):
         self.df = kuai_pure_data.df
         self.features = features
         self.labels = (
             KuaiPureData.BINARY_COLUMNS_PREPROCESSED
             + KuaiPureData.CONTINUOUS_COLUMNS_PREPROCESSED
         )
+        self.rng = rng
+        self._neg_sampling(neg_keep_frac)
 
     def __len__(self):
         return len(self.df)
@@ -124,3 +133,20 @@ class KuaiPureDataset(Dataset):
         x = torch.nan_to_num(x, nan=0.0)  # replace NaN for the first impression
         y = {c: torch.tensor(row[c], dtype=torch.float32) for c in self.labels}
         return x, y
+
+    def _neg_sampling(self, neg_keep_frac: float) -> None:
+        if isclose(neg_keep_frac, 1.0):
+            return
+
+        is_pure_neg = (
+            self.df[KuaiPureData.BINARY_COLUMNS_ORIGINAL].sum(axis=1) == 0
+        ).to_numpy()
+
+        neg_pos = np.flatnonzero(is_pure_neg)
+        keep_neg = self.rng.choice(
+            neg_pos, size=int(len(neg_pos) * neg_keep_frac), replace=False
+        )
+
+        keep_mask = ~is_pure_neg
+        keep_mask[keep_neg] = True
+        self.df = self.df[keep_mask].reset_index(drop=True)

@@ -15,6 +15,7 @@ the ones that silently broke during development:
 
 import math
 
+import numpy as np
 import pandas as pd
 import pytest
 import torch
@@ -432,6 +433,91 @@ def test_nan_targets_pass_through_untouched():
     _, y = ds[0]
     assert torch.isnan(y["is_skip"]), "is_skip NaN was zeroed instead of passed through"
     assert torch.isnan(y["dwell_log"]), "dwell_log NaN was zeroed instead of passed through"
+
+
+# --- KuaiPureDataset negative sampling ---------------------------------------
+# _neg_sampling downsamples only "pure negative" impressions (no engagement
+# signal at all), to shrink the training set without starving the sparse
+# positive heads. The mask is over BINARY_COLUMNS_ORIGINAL only: is_skip (a
+# negative signal that fires on ~70% of rows) and dwell_log (continuous) must
+# NOT count as positives, or the boring rows we mean to drop get protected.
+
+
+def _dataset_with_sampling(
+    rows: list[dict], features: list[str], neg_keep_frac: float
+) -> KuaiPureDataset:
+    df = pd.DataFrame(rows)
+    for col in _ALL_LABELS:
+        if col not in df.columns:
+            df[col] = 0
+    data = KuaiPureData.__new__(KuaiPureData)
+    data.df = df
+    return KuaiPureDataset(data, features, neg_keep_frac=neg_keep_frac)
+
+
+def _pure_neg_row(rate: float = 0.5) -> dict:
+    """No engagement, but skipped with positive dwell -- the exact shape the old
+    mask wrongly protected (is_skip=1 and dwell_log>0 made sum(labels) > 0)."""
+    return {"rate": rate, "is_skip": 1.0, "dwell_log": 2.0}
+
+
+def test_neg_sampling_keeps_every_positive_and_downsamples_negatives():
+    rows = [_pure_neg_row() for _ in range(10)] + [
+        {"rate": 0.5, "is_click": 1} for _ in range(4)
+    ]
+    ds = _dataset_with_sampling(rows, ["rate"], neg_keep_frac=0.5)
+    # 4 positives kept + int(10 * 0.5) = 5 negatives kept.
+    assert len(ds) == 9
+    n_click = sum(ds[i][1]["is_click"].item() == 1.0 for i in range(len(ds)))
+    assert n_click == 4  # no positive was ever eligible for dropping
+
+
+def test_skipped_no_engagement_rows_are_downsampled():
+    """Regression for the is_skip/dwell_log bug: a skipped, positive-dwell row
+    with no engagement is a pure negative and must be droppable."""
+    rows = [_pure_neg_row() for _ in range(10)] + [
+        {"rate": 0.5, "is_click": 1} for _ in range(3)
+    ]
+    ds = _dataset_with_sampling(rows, ["rate"], neg_keep_frac=0.0)
+    # All pure negatives gone despite is_skip=1 / dwell_log>0; positives remain.
+    assert len(ds) == 3
+
+
+def test_any_engagement_signal_protects_a_row():
+    """Every column in BINARY_COLUMNS_ORIGINAL counts -- not just is_click.
+    A lone long_view or a lone (sparse) is_hate positive must survive."""
+    rows = [_pure_neg_row() for _ in range(6)] + [
+        {"rate": 0.5, "long_view": 1},
+        {"rate": 0.5, "is_hate": 1},
+    ]
+    ds = _dataset_with_sampling(rows, ["rate"], neg_keep_frac=0.0)
+    assert len(ds) == 2
+
+
+def test_neg_keep_frac_one_is_a_noop():
+    rows = [_pure_neg_row() for _ in range(5)] + [
+        {"rate": 0.5, "is_click": 1} for _ in range(2)
+    ]
+    ds = _dataset_with_sampling(rows, ["rate"], neg_keep_frac=1.0)
+    assert len(ds) == 7
+
+
+def test_neg_sampling_is_reproducible_under_a_reseeded_rng(monkeypatch):
+    """Sampling draws from the shared module rng, so re-seeding it to the same
+    state must reproduce the same kept rows (the sampler is a pure function of
+    the frame and the rng state)."""
+    import kuai_recommender.data.data_pure as dp
+
+    rows = [_pure_neg_row(rate=i / 20) for i in range(10)] + [
+        {"rate": 1.0, "is_click": 1} for _ in range(3)
+    ]
+
+    def build_once() -> list[float]:
+        monkeypatch.setattr(dp, "rng", np.random.default_rng(42))
+        ds = _dataset_with_sampling(rows, ["rate"], neg_keep_frac=0.5)
+        return sorted(ds[i][0].item() for i in range(len(ds)))
+
+    assert build_once() == build_once()
 
 
 # --- _set_engagement_targets -------------------------------------------------

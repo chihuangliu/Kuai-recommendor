@@ -2,6 +2,8 @@ from enum import StrEnum
 from pathlib import Path
 import os
 
+import numpy as np
+
 _DEFAULT = Path(__file__).resolve().parents[2] / "data" / "KuaiRand-Pure" / "data"
 DATA_DIR = Path(os.environ.get("KUAI_DATA_DIR", _DEFAULT))
 
@@ -27,3 +29,7 @@ def build_splits():
             "history": (KuaiPureDatasetSplits.TRAIN,),
         },
     }
+
+
+SEED = 43
+rng = np.random.default_rng(SEED)
