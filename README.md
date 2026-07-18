@@ -80,8 +80,15 @@ Figure 10.14 and to specific modules being practiced.
       time T uses only data with `time_ms < T`
       - [ ] User rolling reaction rates (7-day click/like/... rates)
       - [ ] **User–author affinity** (historical like/click/comment rate per author)
-      - [ ] Video cumulative engagement (from statistic file, as-of T)
-      - [ ] Post-age bucketing from `upload_dt`; one-hot encode
+      - [ ] Video engagement, computed **from the logs** as-of T (NOT from the statistic
+            file — see below): a cumulative popularity rate (`likes/shows` up to T) plus a
+            short rolling rate (last N hours) for freshness/velocity
+      - [ ] ~~Post-age bucketing from `upload_dt`; one-hot encode~~ — **dropped**:
+            in KuaiRand-Pure all videos were uploaded within a 3-day window
+            (`upload_dt` has only 3 values: Apr 9/10/11), so post-age ≈ impression
+            date minus a constant → near-perfectly collinear with the impression day
+            and no `<1d` fresh samples. The freshness signal is degenerate here; use
+            the log-derived rolling video-engagement rate above instead.
 - [ ] Skip / dwell-time targets from `play_time_ms` vs `duration_ms`
 - [ ] Negative sampling to balance per-task positives (book Fig 10.11)
 - [ ] *(optional)* Wrap features in a **Feast** feature store — same definitions serve
@@ -169,6 +176,11 @@ Verified against the real files (2026-07-17):
   N-independent-DNN* ablation meaningful.
 - **Unbiased eval slice exists** (`log_random`) — rare and valuable; drives Stage 5.
 - **Timestamps present** → point-in-time joins are real, not simulated.
+- **`video_features_statistic_pure.csv` is a leakage trap.** It is one static snapshot per
+  video (aggregate totals over the whole logging period, no timestamp), so it cannot be
+  sliced to time T. Do **not** use it as a training feature — joining its totals onto a row
+  at T leaks future engagement. Use it for EDA only; compute video engagement features from
+  the interaction logs with `time_ms < T` instead.
 - **No friendship table.** Book's close-friend/family affinity feature can't be built;
   user–author affinity (rates + follow) replaces it.
 - **Captions are Chinese**, include hashtags (`#...`) and mentions (`@...`). Requires a

@@ -1,7 +1,23 @@
 [project]
-name = "kuai-recommendor"
+name = "kuai-recommender"
 version = "0.1.0"
-description = "Add your description here"
+description = ""
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pandas>=3.0.3",
+    "torch>=2.13.0",
+    "transformers>=5.14.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["kuai_recommender"]
+
+[dependency-groups]
+test = [
+    "pytest>=9.1.1",
+]

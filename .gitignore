@@ -1,1 +1,4 @@
-data
+/data
+.vscode
+CLAUDE.md
+**__pycache__**
