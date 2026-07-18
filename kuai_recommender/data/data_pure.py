@@ -1,3 +1,4 @@
+import numpy as np
 from torch.utils.data import Dataset
 from kuai_recommender.data.utils import (
     DATA_DIR,
@@ -9,7 +10,7 @@ import torch
 
 
 class KuaiPureData:
-    BINARY_COLUMNS = [
+    BINARY_COLUMNS_ORIGINAL = [
         "is_click",
         "is_like",
         "is_follow",
@@ -19,6 +20,8 @@ class KuaiPureData:
         "long_view",
         "is_profile_enter",
     ]
+    BINARY_COLUMNS_PREPROCESSED = BINARY_COLUMNS_ORIGINAL + ["is_skip"]
+    CONTINUOUS_COLUMNS_PREPROCESSED = ["dwell_log"]
 
     def __init__(
         self,
@@ -38,7 +41,7 @@ class KuaiPureData:
         self._set_user_author_rolling()
         self._set_video_rolling()
         self._set_video_cumulative()
-
+        self._set_engagement_targets()
         self.df = (
             self.df[self.df["is_target"]]
             .drop(columns="is_target")
@@ -59,13 +62,10 @@ class KuaiPureData:
     ) -> None:
         sort_columns = ([group_by] if isinstance(group_by, str) else group_by) + ["dt"]
         self.df = self.df.sort_values(sort_columns)
-        # dropna=False keeps NaN-key rows (e.g. a video missing from the basic
-        # feature file -> NaN author_id) as their own group, so .mean().values
-        # stays the same length as self.df and the positional assign can't misalign.
         grouped = self.df.groupby(group_by, dropna=False)
 
         suffix = "_".join(group_by if isinstance(group_by, list) else [group_by])
-        for col in self.BINARY_COLUMNS:
+        for col in self.BINARY_COLUMNS_ORIGINAL:
             self.df[f"{col}_rolling_{suffix}"] = (
                 grouped.rolling(window=window, closed="left", on="dt")[col]
                 .mean()
@@ -78,7 +78,7 @@ class KuaiPureData:
         grouped = self.df.groupby(group_by, dropna=False)
 
         suffix = "_".join(group_by if isinstance(group_by, list) else [group_by])
-        for col in self.BINARY_COLUMNS:
+        for col in self.BINARY_COLUMNS_ORIGINAL:
             cumulative = grouped[col].cumsum() - self.df[col]
             self.df[f"{col}_cumulative_{suffix}"] = cumulative
 
@@ -94,12 +94,26 @@ class KuaiPureData:
     def _set_video_cumulative(self) -> None:
         self._set_cumulative_columns(group_by="video_id")
 
+    def _set_engagement_targets(self) -> None:
+        dur = self.df["duration_ms"]
+        play = self.df["play_time_ms"]
+        valid = dur > 0
+        completion = (play / dur.where(valid)).clip(upper=1.0)
+        dwell = np.where(valid, np.minimum(play, 2 * dur), np.nan).astype("float32")
+        self.df["is_skip"] = np.where(
+            valid, (completion < 0.5) & (play < 5000), np.nan
+        ).astype("float32")
+        self.df["dwell_log"] = np.log1p(dwell).astype("float32")
+
 
 class KuaiPureDataset(Dataset):
     def __init__(self, kuai_pure_data: KuaiPureData, features):
         self.df = kuai_pure_data.df
         self.features = features
-        self.labels = KuaiPureData.BINARY_COLUMNS
+        self.labels = (
+            KuaiPureData.BINARY_COLUMNS_PREPROCESSED
+            + KuaiPureData.CONTINUOUS_COLUMNS_PREPROCESSED
+        )
 
     def __len__(self):
         return len(self.df)

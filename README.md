@@ -75,21 +75,21 @@ Figure 10.14 and to specific modules being practiced.
 > Book: "Data preparation pipeline". The real concept here is **preventing feature
 > leakage**, not infra. This is the highest-value concept block.
 
-- [ ] Build `<user, video>` training rows from impression logs (one row per impression)
-- [ ] **Point-in-time feature computation** with `pandas.merge_asof` — every feature at
+- [v] Build `<user, video>` training rows from impression logs (one row per impression)
+- [v] **Point-in-time feature computation** with `pandas.merge_asof` — every feature at
       time T uses only data with `time_ms < T`
-      - [ ] User rolling reaction rates (7-day click/like/... rates)
-      - [ ] **User–author affinity** (historical like/click/comment rate per author)
-      - [ ] Video engagement, computed **from the logs** as-of T (NOT from the statistic
+      - [v] User rolling reaction rates (7-day click/like/... rates)
+      - [v] **User–author affinity** (historical like/click/comment rate per author)
+      - [v] Video engagement, computed **from the logs** as-of T (NOT from the statistic
             file — see below): a cumulative popularity rate (`likes/shows` up to T) plus a
             short rolling rate (last N hours) for freshness/velocity
-      - [ ] ~~Post-age bucketing from `upload_dt`; one-hot encode~~ — **dropped**:
+      - [x]~~Post-age bucketing from `upload_dt`; one-hot encode~~ — **dropped**:
             in KuaiRand-Pure all videos were uploaded within a 3-day window
             (`upload_dt` has only 3 values: Apr 9/10/11), so post-age ≈ impression
             date minus a constant → near-perfectly collinear with the impression day
             and no `<1d` fresh samples. The freshness signal is degenerate here; use
             the log-derived rolling video-engagement rate above instead.
-- [ ] Skip / dwell-time targets from `play_time_ms` vs `duration_ms`
+- [v] Skip / dwell-time targets from `play_time_ms` vs `duration_ms`
 - [ ] Negative sampling to balance per-task positives (book Fig 10.11)
 - [ ] *(optional)* Wrap features in a **Feast** feature store — same definitions serve
       training (offline / point-in-time) and serving (online / latest value)

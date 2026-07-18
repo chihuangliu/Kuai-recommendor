@@ -34,7 +34,7 @@ def _make(rows: list[dict]) -> KuaiPureData:
     """
     df = pd.DataFrame(rows)
     df["dt"] = pd.to_datetime(df["dt"]).dt.tz_localize(TZ)
-    for col in KuaiPureData.BINARY_COLUMNS:
+    for col in KuaiPureData.BINARY_COLUMNS_ORIGINAL:
         if col not in df.columns:
             df[col] = 0
     # Deliberately shuffle so we prove the method's own sort/alignment, not the
@@ -217,7 +217,7 @@ def test_all_binary_columns_get_a_rolling_feature():
         ]
     )
     obj._set_user_rolling()
-    for col in KuaiPureData.BINARY_COLUMNS:
+    for col in KuaiPureData.BINARY_COLUMNS_ORIGINAL:
         assert f"{col}_rolling_user_id" in obj.df.columns
 
 
@@ -315,7 +315,7 @@ def test_cumulative_creates_a_column_per_binary_label():
         ]
     )
     obj._set_video_cumulative()
-    for col in KuaiPureData.BINARY_COLUMNS:
+    for col in KuaiPureData.BINARY_COLUMNS_ORIGINAL:
         assert f"{col}_cumulative_video_id" in obj.df.columns
 
 
@@ -328,10 +328,34 @@ def test_rolling_survives_nan_group_key():
     """NaN author_id rows are kept (own group), not dropped -> no length mismatch."""
     obj = _make(
         [
-            {"rid": 1, "user_id": 1, "author_id": 10, "dt": "2022-04-08", "is_click": 1},
-            {"rid": 2, "user_id": 1, "author_id": 10, "dt": "2022-04-09", "is_click": 0},
-            {"rid": 3, "user_id": 1, "author_id": float("nan"), "dt": "2022-04-08", "is_click": 1},
-            {"rid": 4, "user_id": 1, "author_id": float("nan"), "dt": "2022-04-09", "is_click": 1},
+            {
+                "rid": 1,
+                "user_id": 1,
+                "author_id": 10,
+                "dt": "2022-04-08",
+                "is_click": 1,
+            },
+            {
+                "rid": 2,
+                "user_id": 1,
+                "author_id": 10,
+                "dt": "2022-04-09",
+                "is_click": 0,
+            },
+            {
+                "rid": 3,
+                "user_id": 1,
+                "author_id": float("nan"),
+                "dt": "2022-04-08",
+                "is_click": 1,
+            },
+            {
+                "rid": 4,
+                "user_id": 1,
+                "author_id": float("nan"),
+                "dt": "2022-04-09",
+                "is_click": 1,
+            },
         ]
     )
     obj._set_user_author_rolling()  # would ValueError on length mismatch if NaN rows were dropped
@@ -347,10 +371,18 @@ def test_rolling_survives_nan_group_key():
 # that NaN must not reach training.
 
 
+_ALL_LABELS = (
+    KuaiPureData.BINARY_COLUMNS_PREPROCESSED
+    + KuaiPureData.CONTINUOUS_COLUMNS_PREPROCESSED
+)
+
+
 def _make_dataset(rows: list[dict], features: list[str]) -> KuaiPureDataset:
     """Wrap a hand-built df in a KuaiPureDataset, bypassing KuaiPureData.__init__."""
     df = pd.DataFrame(rows)
-    for col in KuaiPureData.BINARY_COLUMNS:
+    # Every label the Dataset emits (originals + is_skip + dwell_log) must exist
+    # as a column, or __getitem__ KeyErrors reading the target dict.
+    for col in _ALL_LABELS:
         if col not in df.columns:
             df[col] = 0
     data = KuaiPureData.__new__(KuaiPureData)
@@ -367,7 +399,7 @@ def test_getitem_returns_feature_tensor_and_label_dict():
     x, y = ds[0]
     assert isinstance(x, torch.Tensor) and x.dtype == torch.float32
     assert x.shape == (1,)
-    assert set(y.keys()) == set(KuaiPureData.BINARY_COLUMNS)
+    assert set(y.keys()) == set(_ALL_LABELS)
     assert y["is_click"].item() == 1.0
 
 
@@ -385,3 +417,127 @@ def test_no_nan_features_reach_training():
         assert not torch.isnan(x).any(), f"row {i} leaked NaN into features"
     # NaN is mapped to 0.0 (a 0% prior rate), not dropped.
     assert ds[0][0].item() == 0.0
+
+
+def test_nan_targets_pass_through_untouched():
+    """A NaN skip/dwell label (duration<=0) must reach y as NaN, NOT be zeroed.
+
+    Masking happens in the loss (via isnan), so the Dataset must preserve the NaN;
+    zeroing it here would silently teach the model 'not a skip' / dwell 0.
+    """
+    ds = _make_dataset(
+        [{"rate": 0.5, "is_skip": float("nan"), "dwell_log": float("nan")}],
+        features=["rate"],
+    )
+    _, y = ds[0]
+    assert torch.isnan(y["is_skip"]), "is_skip NaN was zeroed instead of passed through"
+    assert torch.isnan(y["dwell_log"]), "dwell_log NaN was zeroed instead of passed through"
+
+
+# --- _set_engagement_targets -------------------------------------------------
+# Skip / dwell targets derived row-wise from play_time_ms vs duration_ms.
+#
+#   is_skip   = (completion < 0.5) AND (play_time_ms < 5000)  -- both must be low
+#   completion = clip(play/duration, upper=1)                 -- loops don't exceed 1
+#   dwell_log  = log1p(min(play, 2*duration))                 -- cap loop replays
+#
+# When duration_ms <= 0 the denominator is unknown, so BOTH targets are NaN
+# (we abstain rather than fabricate a label from raw watch time).
+
+
+def _make_targets(rows: list[dict]) -> KuaiPureData:
+    """Build a KuaiPureData carrying only duration_ms/play_time_ms, then derive targets."""
+    df = pd.DataFrame(rows)
+    obj = KuaiPureData.__new__(KuaiPureData)
+    obj.df = df
+    obj._set_engagement_targets()
+    return obj
+
+
+def _col(obj: KuaiPureData, column: str) -> dict:
+    return obj.df.set_index("rid")[column].to_dict()
+
+
+def _isnan(x) -> bool:
+    return isinstance(x, float) and math.isnan(x)
+
+
+def test_skip_needs_both_low_completion_and_low_time():
+    """AND semantics: skip only when the user watched a small *fraction* AND little absolute time."""
+    obj = _make_targets(
+        [
+            # low completion (0.1) + low time (1s)  -> skip
+            {"rid": 1, "duration_ms": 10_000, "play_time_ms": 1_000},
+            # low completion (0.2) but 40s watched of a long video -> NOT a skip (the rescue)
+            {"rid": 2, "duration_ms": 200_000, "play_time_ms": 40_000},
+            # short clip watched in full (completion 1.0), only 3s -> NOT a skip
+            {"rid": 3, "duration_ms": 3_000, "play_time_ms": 3_000},
+            # high completion + high time -> NOT a skip
+            {"rid": 4, "duration_ms": 20_000, "play_time_ms": 18_000},
+        ]
+    )
+    assert _col(obj, "is_skip") == {1: 1.0, 2: 0.0, 3: 0.0, 4: 0.0}
+
+
+def test_skip_thresholds_are_strict():
+    """completion == 0.5 and play == 5000 sit on the 'not skip' side (strict `<`)."""
+    obj = _make_targets(
+        [
+            # completion exactly 0.5 -> not < 0.5 -> not skip
+            {"rid": 1, "duration_ms": 10_000, "play_time_ms": 5_000},
+            # completion 0.4 (< 0.5) but play exactly 5000 -> not < 5000 -> not skip
+            {"rid": 2, "duration_ms": 12_500, "play_time_ms": 5_000},
+            # completion 0.4 and play 4999 -> both strictly low -> skip
+            {"rid": 3, "duration_ms": 12_500, "play_time_ms": 4_999},
+        ]
+    )
+    assert _col(obj, "is_skip") == {1: 0.0, 2: 0.0, 3: 1.0}
+
+
+def test_completion_clipped_so_loops_are_not_skips():
+    """A replayed short clip (play > duration) has completion clipped to 1.0 -> never a skip."""
+    obj = _make_targets([{"rid": 1, "duration_ms": 2_000, "play_time_ms": 10_000}])
+    assert _col(obj, "is_skip")[1] == 0.0
+
+
+def test_dwell_log_is_log1p_of_watch_time():
+    """Normal watch (play <= 2*duration): dwell_log = log1p(play_time_ms)."""
+    obj = _make_targets(
+        [
+            {"rid": 1, "duration_ms": 10_000, "play_time_ms": 1_000},
+            {"rid": 2, "duration_ms": 200_000, "play_time_ms": 40_000},
+            {
+                "rid": 3,
+                "duration_ms": 10_000,
+                "play_time_ms": 0,
+            },  # instant skip -> log1p(0)=0
+        ]
+    )
+    dwell = _col(obj, "dwell_log")
+    assert dwell[1] == pytest.approx(math.log1p(1_000), rel=1e-5)
+    assert dwell[2] == pytest.approx(math.log1p(40_000), rel=1e-5)
+    assert dwell[3] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_dwell_caps_loop_replays_at_two_durations():
+    """play_time far above the video length is capped at 2*duration before log1p."""
+    obj = _make_targets([{"rid": 1, "duration_ms": 2_000, "play_time_ms": 10_000}])
+    # min(10_000, 2*2_000) = 4_000
+    assert _col(obj, "dwell_log")[1] == pytest.approx(math.log1p(4_000), rel=1e-5)
+
+
+def test_invalid_duration_abstains_on_both_targets():
+    """duration_ms <= 0 -> denominator unknown -> is_skip and dwell_log are NaN, not fabricated."""
+    obj = _make_targets(
+        [
+            {"rid": 1, "duration_ms": 0, "play_time_ms": 1_000},
+            {"rid": 2, "duration_ms": -5, "play_time_ms": 0},
+            {"rid": 3, "duration_ms": 10_000, "play_time_ms": 1_000},  # valid control
+        ]
+    )
+    skip = _col(obj, "is_skip")
+    dwell = _col(obj, "dwell_log")
+    assert _isnan(skip[1]) and _isnan(dwell[1])
+    assert _isnan(skip[2]) and _isnan(dwell[2])
+    # the valid row is unaffected and still labelled
+    assert skip[3] == 1.0 and not _isnan(dwell[3])
