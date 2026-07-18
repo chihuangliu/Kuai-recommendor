@@ -90,7 +90,7 @@ Figure 10.14 and to specific modules being practiced.
             and no `<1d` fresh samples. The freshness signal is degenerate here; use
             the log-derived rolling video-engagement rate above instead.
 - [v] Skip / dwell-time targets from `play_time_ms` vs `duration_ms`
-- [ ] Negative sampling to balance per-task positives (book Fig 10.11)
+- [v] Negative sampling to balance per-task positives (book Fig 10.11)
 - [ ] *(optional)* Wrap features in a **Feast** feature store — same definitions serve
       training (offline / point-in-time) and serving (online / latest value)
 - [ ] *(optional)* Event-replay script to simulate **streaming** incremental updates
@@ -102,7 +102,7 @@ Figure 10.14 and to specific modules being practiced.
 ### 2. Ranking model — *multi-task DNN*  ← core of the project
 > Book: "Ranking service" + Fig 10.8/10.9/10.10. Shared backbone, N task heads.
 
-- [ ] Custom `Dataset` returning a multi-label target dict + `collate_fn`
+- [v] Custom `Dataset` returning a multi-label target dict + `collate_fn`
 - [ ] Shared trunk + `nn.ModuleList` of heads (binary heads + dwell-time regression head)
 - [ ] `nn.Embedding` for `user_id` / `author_id` / `tag`
 - [ ] Combined loss: `BCEWithLogitsLoss(pos_weight=...)` per binary head + `HuberLoss`

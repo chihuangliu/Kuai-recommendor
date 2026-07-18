@@ -20,7 +20,11 @@ import pandas as pd
 import pytest
 import torch
 
-from kuai_recommender.data.data_pure import KuaiPureData, KuaiPureDataset
+from kuai_recommender.data.data_pure import (
+    KuaiPureData,
+    KuaiPureDataset,
+    collate_with_masks,
+)
 
 TZ = "Asia/Shanghai"
 
@@ -627,3 +631,91 @@ def test_invalid_duration_abstains_on_both_targets():
     assert _isnan(skip[2]) and _isnan(dwell[2])
     # the valid row is unaffected and still labelled
     assert skip[3] == 1.0 and not _isnan(dwell[3])
+
+
+# --- collate_with_masks -------------------------------------------------------
+# Turns a list of per-sample (x, {label: scalar}) into batched tensors, laid out
+# for a vectorised multi-task loss: binary labels stacked into [B, K] (column
+# order == BINARY_COLUMNS_PREPROCESSED), continuous into [B, C], plus a validity
+# mask per target group. The mask is the whole point: is_skip/dwell_log are NaN
+# when duration<=0, and a NaN target must be *masked*, not silently zeroed.
+
+_BIN_COLS = KuaiPureData.BINARY_COLUMNS_PREPROCESSED
+_CONT_COLS = KuaiPureData.CONTINUOUS_COLUMNS_PREPROCESSED
+
+
+def _sample(
+    feature_vec: list[float], **labels: float
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Build one (x, y) exactly as KuaiPureDataset.__getitem__ would: x is a
+    feature vector, y maps every label to a scalar tensor (unset labels -> 0)."""
+    x = torch.tensor(feature_vec, dtype=torch.float32)
+    y = {
+        c: torch.tensor(float(labels.get(c, 0.0)), dtype=torch.float32)
+        for c in _ALL_LABELS
+    }
+    return x, y
+
+
+def test_collate_shapes_and_dtypes():
+    """x -> [B, F]; binary -> [B, K]; continuous -> [B, C]; masks match and are bool."""
+    batch = [_sample([0.1, 0.2]), _sample([0.3, 0.4]), _sample([0.5, 0.6])]
+    x, y_bin, y_cont, m_bin, m_cont = collate_with_masks(batch)
+
+    assert x.shape == (3, 2) and x.dtype == torch.float32
+    assert y_bin.shape == (3, len(_BIN_COLS))
+    assert y_cont.shape == (3, len(_CONT_COLS))
+    assert m_bin.shape == y_bin.shape and m_bin.dtype == torch.bool
+    assert m_cont.shape == y_cont.shape and m_cont.dtype == torch.bool
+
+
+def test_collate_binary_column_order_matches_preprocessed():
+    """Column j of y_binary is BINARY_COLUMNS_PREPROCESSED[j] -- not insertion order."""
+    batch = [_sample([0.0], is_click=1.0, is_hate=1.0)]
+    _, y_bin, _, _, _ = collate_with_masks(batch)
+
+    for j, col in enumerate(_BIN_COLS):
+        expected = 1.0 if col in ("is_click", "is_hate") else 0.0
+        assert y_bin[0, j].item() == expected, f"{col} landed in the wrong column"
+
+
+def test_collate_preserves_row_order():
+    """Row i of every batched tensor is sample i -- collate must not reorder."""
+    batch = [
+        _sample([1.0], is_click=1.0),
+        _sample([2.0], is_like=1.0),
+        _sample([3.0], long_view=1.0),
+    ]
+    x, y_bin, _, _, _ = collate_with_masks(batch)
+
+    assert x[:, 0].tolist() == [1.0, 2.0, 3.0]
+    assert y_bin[0, _BIN_COLS.index("is_click")].item() == 1.0
+    assert y_bin[1, _BIN_COLS.index("is_like")].item() == 1.0
+    assert y_bin[2, _BIN_COLS.index("long_view")].item() == 1.0
+
+
+def test_collate_masks_nan_targets_and_keeps_valid_ones():
+    """NaN is_skip/dwell_log -> mask False at those cells, True everywhere else."""
+    batch = [
+        _sample([0.5], is_click=1.0),  # fully valid
+        _sample([0.5], is_skip=float("nan"), dwell_log=float("nan")),  # duration<=0
+    ]
+    _, y_bin, y_cont, m_bin, m_cont = collate_with_masks(batch)
+
+    skip_j = _BIN_COLS.index("is_skip")
+    # Row 0 is entirely valid; row 1's is_skip is masked out, its other binaries stay valid.
+    assert m_bin[0].all()
+    assert not m_bin[1, skip_j]
+    assert m_bin[1, [j for j in range(len(_BIN_COLS)) if j != skip_j]].all()
+    # dwell_log: valid for row 0, masked for row 1.
+    assert m_cont[0].all() and not m_cont[1].any()
+
+
+def test_collate_does_not_zero_the_masked_target():
+    """The masked cell must still carry NaN in y (the mask flags it; loss skips it).
+    Zeroing here would teach the model a fake 'not a skip' / dwell 0."""
+    batch = [_sample([0.5], is_skip=float("nan"), dwell_log=float("nan"))]
+    _, y_bin, y_cont, _, _ = collate_with_masks(batch)
+
+    assert torch.isnan(y_bin[0, _BIN_COLS.index("is_skip")])
+    assert torch.isnan(y_cont[0, 0])

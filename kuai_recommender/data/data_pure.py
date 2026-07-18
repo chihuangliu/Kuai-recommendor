@@ -127,7 +127,7 @@ class KuaiPureDataset(Dataset):
     def __len__(self):
         return len(self.df)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         row = self.df.iloc[idx]
         x = torch.tensor(row[self.features].to_numpy(dtype="float32"))
         x = torch.nan_to_num(x, nan=0.0)  # replace NaN for the first impression
@@ -150,3 +150,27 @@ class KuaiPureDataset(Dataset):
         keep_mask = ~is_pure_neg
         keep_mask[keep_neg] = True
         self.df = self.df[keep_mask].reset_index(drop=True)
+
+
+def collate_with_masks(
+    batch: list[tuple[torch.Tensor, dict[str, torch.Tensor]]],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    xs, ys = zip(*batch)
+    x_batch = torch.stack(xs)  # [B, F]
+
+    def stack_cols(cols: list[str]) -> torch.Tensor:
+        return torch.stack(
+            [torch.stack([y[c] for y in ys]) for c in cols], dim=1
+        )  # [B, len(cols)]
+
+    y_binary_batch = stack_cols(KuaiPureData.BINARY_COLUMNS_PREPROCESSED)
+    y_continuous_batch = stack_cols(KuaiPureData.CONTINUOUS_COLUMNS_PREPROCESSED)
+    mask_binary_batch = ~torch.isnan(y_binary_batch)
+    mask_continuous_batch = ~torch.isnan(y_continuous_batch)
+    return (
+        x_batch,
+        y_binary_batch,
+        y_continuous_batch,
+        mask_binary_batch,
+        mask_continuous_batch,
+    )
