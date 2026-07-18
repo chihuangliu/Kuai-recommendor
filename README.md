@@ -103,7 +103,7 @@ Figure 10.14 and to specific modules being practiced.
 > Book: "Ranking service" + Fig 10.8/10.9/10.10. Shared backbone, N task heads.
 
 - [v] Custom `Dataset` returning a multi-label target dict + `collate_fn`
-- [ ] Shared trunk + `nn.ModuleList` of heads (binary heads + dwell-time regression head)
+- [v] Shared trunk + `nn.ModuleList` of heads (binary heads + dwell-time regression head)
 - [ ] `nn.Embedding` for `user_id` / `author_id` / `tag`
 - [ ] Combined loss: `BCEWithLogitsLoss(pos_weight=...)` per binary head + `HuberLoss`
       for dwell-time, weighted sum
