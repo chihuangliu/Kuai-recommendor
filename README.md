@@ -104,8 +104,8 @@ Figure 10.14 and to specific modules being practiced.
 
 - [v] Custom `Dataset` returning a multi-label target dict + `collate_fn`
 - [v] Shared trunk + `nn.ModuleList` of heads (binary heads + dwell-time regression head)
-- [ ] `nn.Embedding` for `user_id` / `author_id` / `tag`
-- [ ] Combined loss: `BCEWithLogitsLoss(pos_weight=...)` per binary head + `HuberLoss`
+- [v] `nn.Embedding` for `user_id` / `author_id` / `tag`
+- [v] Combined loss: `BCEWithLogitsLoss(pos_weight=...)` per binary head + `HuberLoss`
       for dwell-time, weighted sum
 - [ ] **Ablation A:** multi-task DNN vs N independent DNNs (esp. on sparse heads)
 - [ ] **Ablation B:** add dwell-time + skip heads → measure effect on *passive* users

@@ -2,3 +2,5 @@
 .vscode
 CLAUDE.md
 **__pycache__**
+.tmp
+/run

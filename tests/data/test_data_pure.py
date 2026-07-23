@@ -25,6 +25,7 @@ from kuai_recommender.data.data_pure import (
     KuaiPureDataset,
     collate_with_masks,
 )
+from kuai_recommender.data.utils import next_pow2
 
 TZ = "Asia/Shanghai"
 
@@ -380,16 +381,24 @@ _ALL_LABELS = (
     KuaiPureData.BINARY_COLUMNS_PREPROCESSED
     + KuaiPureData.CONTINUOUS_COLUMNS_PREPROCESSED
 )
+_ALL_CAT = KuaiPureData.CATEGORICAL_COLUMNS_PREPROCESSED
+
+
+def _fill_missing(df: pd.DataFrame) -> pd.DataFrame:
+    """Add any label/categorical column the Dataset reads but the row dict omits.
+
+    __getitem__ reads every label (into the target dict) and every categorical
+    bucket (into x_cat); a missing column KeyErrors, so default them to 0.
+    """
+    for col in _ALL_LABELS + _ALL_CAT:
+        if col not in df.columns:
+            df[col] = 0
+    return df
 
 
 def _make_dataset(rows: list[dict], features: list[str]) -> KuaiPureDataset:
     """Wrap a hand-built df in a KuaiPureDataset, bypassing KuaiPureData.__init__."""
-    df = pd.DataFrame(rows)
-    # Every label the Dataset emits (originals + is_skip + dwell_log) must exist
-    # as a column, or __getitem__ KeyErrors reading the target dict.
-    for col in _ALL_LABELS:
-        if col not in df.columns:
-            df[col] = 0
+    df = _fill_missing(pd.DataFrame(rows))
     data = KuaiPureData.__new__(KuaiPureData)
     data.df = df
     return KuaiPureDataset(data, features)
@@ -401,7 +410,7 @@ def test_getitem_returns_feature_tensor_and_label_dict():
         features=["rate"],
     )
     assert len(ds) == 2
-    x, y = ds[0]
+    x, x_cat, y = ds[0]
     assert isinstance(x, torch.Tensor) and x.dtype == torch.float32
     assert x.shape == (1,)
     assert set(y.keys()) == set(_ALL_LABELS)
@@ -418,7 +427,7 @@ def test_no_nan_features_reach_training():
         features=["rate"],
     )
     for i in range(len(ds)):
-        x, _ = ds[i]
+        x, _, _ = ds[i]
         assert not torch.isnan(x).any(), f"row {i} leaked NaN into features"
     # NaN is mapped to 0.0 (a 0% prior rate), not dropped.
     assert ds[0][0].item() == 0.0
@@ -434,7 +443,7 @@ def test_nan_targets_pass_through_untouched():
         [{"rate": 0.5, "is_skip": float("nan"), "dwell_log": float("nan")}],
         features=["rate"],
     )
-    _, y = ds[0]
+    _, _, y = ds[0]
     assert torch.isnan(y["is_skip"]), "is_skip NaN was zeroed instead of passed through"
     assert torch.isnan(y["dwell_log"]), "dwell_log NaN was zeroed instead of passed through"
 
@@ -450,10 +459,7 @@ def test_nan_targets_pass_through_untouched():
 def _dataset_with_sampling(
     rows: list[dict], features: list[str], neg_keep_frac: float
 ) -> KuaiPureDataset:
-    df = pd.DataFrame(rows)
-    for col in _ALL_LABELS:
-        if col not in df.columns:
-            df[col] = 0
+    df = _fill_missing(pd.DataFrame(rows))
     data = KuaiPureData.__new__(KuaiPureData)
     data.df = df
     return KuaiPureDataset(data, features, neg_keep_frac=neg_keep_frac)
@@ -472,7 +478,7 @@ def test_neg_sampling_keeps_every_positive_and_downsamples_negatives():
     ds = _dataset_with_sampling(rows, ["rate"], neg_keep_frac=0.5)
     # 4 positives kept + int(10 * 0.5) = 5 negatives kept.
     assert len(ds) == 9
-    n_click = sum(ds[i][1]["is_click"].item() == 1.0 for i in range(len(ds)))
+    n_click = sum(ds[i][2]["is_click"].item() == 1.0 for i in range(len(ds)))
     assert n_click == 4  # no positive was ever eligible for dropping
 
 
@@ -645,24 +651,27 @@ _CONT_COLS = KuaiPureData.CONTINUOUS_COLUMNS_PREPROCESSED
 
 
 def _sample(
-    feature_vec: list[float], **labels: float
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Build one (x, y) exactly as KuaiPureDataset.__getitem__ would: x is a
-    feature vector, y maps every label to a scalar tensor (unset labels -> 0)."""
+    feature_vec: list[float], *, cat: list[int] | None = None, **labels: float
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+    """Build one (x, x_cat, y) exactly as KuaiPureDataset.__getitem__ would: x is a
+    feature vector, x_cat the long categorical bucket ids (defaults to zeros), and
+    y maps every label to a scalar tensor (unset labels -> 0)."""
     x = torch.tensor(feature_vec, dtype=torch.float32)
+    x_cat = torch.tensor(cat if cat is not None else [0] * len(_ALL_CAT), dtype=torch.long)
     y = {
         c: torch.tensor(float(labels.get(c, 0.0)), dtype=torch.float32)
         for c in _ALL_LABELS
     }
-    return x, y
+    return x, x_cat, y
 
 
 def test_collate_shapes_and_dtypes():
     """x -> [B, F]; binary -> [B, K]; continuous -> [B, C]; masks match and are bool."""
     batch = [_sample([0.1, 0.2]), _sample([0.3, 0.4]), _sample([0.5, 0.6])]
-    x, y_bin, y_cont, m_bin, m_cont = collate_with_masks(batch)
+    x, x_cat, y_bin, y_cont, m_bin, m_cont = collate_with_masks(batch)
 
     assert x.shape == (3, 2) and x.dtype == torch.float32
+    assert x_cat.shape == (3, len(_ALL_CAT)) and x_cat.dtype == torch.long
     assert y_bin.shape == (3, len(_BIN_COLS))
     assert y_cont.shape == (3, len(_CONT_COLS))
     assert m_bin.shape == y_bin.shape and m_bin.dtype == torch.bool
@@ -672,7 +681,7 @@ def test_collate_shapes_and_dtypes():
 def test_collate_binary_column_order_matches_preprocessed():
     """Column j of y_binary is BINARY_COLUMNS_PREPROCESSED[j] -- not insertion order."""
     batch = [_sample([0.0], is_click=1.0, is_hate=1.0)]
-    _, y_bin, _, _, _ = collate_with_masks(batch)
+    _, _, y_bin, _, _, _ = collate_with_masks(batch)
 
     for j, col in enumerate(_BIN_COLS):
         expected = 1.0 if col in ("is_click", "is_hate") else 0.0
@@ -686,7 +695,7 @@ def test_collate_preserves_row_order():
         _sample([2.0], is_like=1.0),
         _sample([3.0], long_view=1.0),
     ]
-    x, y_bin, _, _, _ = collate_with_masks(batch)
+    x, _, y_bin, _, _, _ = collate_with_masks(batch)
 
     assert x[:, 0].tolist() == [1.0, 2.0, 3.0]
     assert y_bin[0, _BIN_COLS.index("is_click")].item() == 1.0
@@ -700,7 +709,7 @@ def test_collate_masks_nan_targets_and_keeps_valid_ones():
         _sample([0.5], is_click=1.0),  # fully valid
         _sample([0.5], is_skip=float("nan"), dwell_log=float("nan")),  # duration<=0
     ]
-    _, y_bin, y_cont, m_bin, m_cont = collate_with_masks(batch)
+    _, _, y_bin, y_cont, m_bin, m_cont = collate_with_masks(batch)
 
     skip_j = _BIN_COLS.index("is_skip")
     # Row 0 is entirely valid; row 1's is_skip is masked out, its other binaries stay valid.
@@ -715,7 +724,132 @@ def test_collate_does_not_zero_the_masked_target():
     """The masked cell must still carry NaN in y (the mask flags it; loss skips it).
     Zeroing here would teach the model a fake 'not a skip' / dwell 0."""
     batch = [_sample([0.5], is_skip=float("nan"), dwell_log=float("nan"))]
-    _, y_bin, y_cont, _, _ = collate_with_masks(batch)
+    _, _, y_bin, y_cont, _, _ = collate_with_masks(batch)
 
     assert torch.isnan(y_bin[0, _BIN_COLS.index("is_skip")])
     assert torch.isnan(y_cont[0, 0])
+
+
+# --- categorical (hash-bucket) features ---------------------------------------
+# user_id / author_id are folded into a fixed number of hash buckets so the model
+# can embed high-cardinality ids. __getitem__ emits them as a long tensor and
+# collate stacks them to [B, C]; column order == CATEGORICAL_COLUMNS_PREPROCESSED.
+
+
+def test_getitem_returns_categorical_bucket_tensor():
+    """x_cat carries the bucket ids as int64, in CATEGORICAL_COLUMNS_PREPROCESSED order."""
+    ds = _make_dataset(
+        [{"rate": 0.25, "is_click": 1, "user_id_bucket": 3, "author_id_bucket": 7}],
+        features=["rate"],
+    )
+    x, x_cat, y = ds[0]
+    assert x_cat.dtype == torch.long
+    assert x_cat.shape == (len(_ALL_CAT),)
+    # order is user_bucket, author_bucket
+    assert x_cat.tolist() == [3, 7]
+
+
+def test_collate_stacks_categorical_features():
+    """Per-sample x_cat vectors stack into [B, C], preserving row and column order."""
+    batch = [_sample([0.1], cat=[3, 7]), _sample([0.2], cat=[4, 8])]
+    _, x_cat, *_ = collate_with_masks(batch)
+    assert x_cat.dtype == torch.long
+    assert x_cat.shape == (2, len(_ALL_CAT))
+    assert x_cat.tolist() == [[3, 7], [4, 8]]
+
+
+# --- next_pow2 ---------------------------------------------------------------
+# Bucket counts are rounded up to a power of two of 4x the training-set
+# cardinality (headroom to keep hash collisions rare).
+
+
+@pytest.mark.parametrize(
+    "n, expected",
+    [(1, 1), (2, 2), (3, 4), (4, 4), (5, 8), (7, 8), (8, 8), (9, 16), (1000, 1024)],
+)
+def test_next_pow2_rounds_up_to_power_of_two(n, expected):
+    """Exact powers of two are unchanged; anything else rounds up to the next one."""
+    assert next_pow2(n) == expected
+
+
+# --- KuaiPureData._hash_to_bucket / _set_hash_bucket -------------------------
+# Bucket 0 is reserved for missing ids; real ids map to [1, n_buckets-1] so the
+# index is always a valid row of an nn.Embedding(n_buckets, ...). str()-normalising
+# before hashing is what lets numpy scalars (df.apply passes np.int64) and NaN
+# (an author_id absent from the basic feature file) be handled without a crash.
+
+
+@pytest.mark.parametrize("missing", [float("nan"), np.nan, pd.NA, None])
+def test_hash_to_bucket_reserves_zero_for_missing(missing):
+    """Any missing value maps to the reserved bucket 0, never raising."""
+    assert KuaiPureData._hash_to_bucket(missing, 16) == 0
+
+
+def test_hash_to_bucket_stays_in_valid_embedding_range():
+    """Non-missing ids land in [1, n_buckets-1]: never 0 (reserved) and never
+    n_buckets (which would index past nn.Embedding(n_buckets))."""
+    n_buckets = 8
+    for v in range(2000):
+        b = KuaiPureData._hash_to_bucket(v, n_buckets)
+        assert 1 <= b <= n_buckets - 1, f"value {v} -> out-of-range bucket {b}"
+
+
+def test_hash_to_bucket_is_deterministic():
+    """The same id always hashes to the same bucket (stable across splits/epochs)."""
+    assert KuaiPureData._hash_to_bucket(12345, 64) == KuaiPureData._hash_to_bucket(
+        12345, 64
+    )
+
+
+def test_hash_to_bucket_normalises_numpy_and_python_ints():
+    """np.int64 (what a df column yields under .apply) and a plain int hash alike,
+    because the value is str()-normalised before hashing."""
+    assert KuaiPureData._hash_to_bucket(np.int64(777), 64) == KuaiPureData._hash_to_bucket(
+        777, 64
+    )
+
+
+def _bucket_obj(values: list, column: str = "user_id") -> KuaiPureData:
+    obj = KuaiPureData.__new__(KuaiPureData)
+    obj.df = pd.DataFrame({column: values})
+    return obj
+
+
+def test_set_hash_bucket_handles_int64_column():
+    """Regression: an int64 id column buckets without error and stays in range."""
+    obj = _bucket_obj([1, 2, 3, 4, 5])
+    obj._set_hash_bucket("user_id", 16)
+    buckets = obj.df["user_id_bucket"]
+    assert buckets.between(1, 15).all()
+
+
+def test_set_hash_bucket_maps_nan_to_zero():
+    """Regression: an author_id NaN (video missing from the basic feature file) buckets
+    to the reserved 0, while real authors get a non-zero bucket."""
+    obj = _bucket_obj([10.0, float("nan"), 20.0], column="author_id")
+    obj._set_hash_bucket("author_id", 16)
+    buckets = obj.df["author_id_bucket"].tolist()
+    assert buckets[1] == 0
+    assert buckets[0] != 0 and buckets[2] != 0
+
+
+def test_set_hash_bucket_is_stable_per_id():
+    """Repeated ids in a column all resolve to the same bucket."""
+    obj = _bucket_obj([42, 7, 42, 7, 42])
+    obj._set_hash_bucket("user_id", 32)
+    b = obj.df["user_id_bucket"].tolist()
+    assert b[0] == b[2] == b[4]  # every 42
+    assert b[1] == b[3]  # every 7
+
+
+def test_set_user_and_author_buckets_write_categorical_columns():
+    """_set_user_buckets / _set_author_buckets populate exactly the columns
+    __getitem__ reads as categorical features."""
+    obj = KuaiPureData.__new__(KuaiPureData)
+    obj.df = pd.DataFrame({"user_id": [1, 2], "author_id": [10.0, float("nan")]})
+    obj._set_user_buckets(16)
+    obj._set_author_buckets(16)
+    for col in _ALL_CAT:
+        assert col in obj.df.columns
+    # NaN author still resolves to the reserved bucket, not a crash.
+    assert obj.df["author_id_bucket"].tolist()[1] == 0
