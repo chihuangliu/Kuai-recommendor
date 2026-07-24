@@ -7,8 +7,12 @@ The training loop was split into small, independently testable helpers:
   * ``calc_loss``         -- combine the two task losses into one scalar,
   * ``score2label``       -- threshold probabilities into 0/1 predictions,
   * ``prepare_binary_per_batch`` -- detach/sigmoid a batch into numpy arrays,
+  * ``prepare_continuous_per_batch`` -- detach a regression batch into numpy
+                             arrays (no sigmoid -- the head outputs values),
   * ``BinaryScores``      -- accumulate per-batch predictions and dump
-                             per-feature classification metrics.
+                             per-feature classification metrics,
+  * ``ContinuousScores``  -- accumulate per-batch predictions and dump
+                             per-feature RMSE.
 
 The properties pinned down here are the ones easy to get subtly wrong:
 
@@ -16,10 +20,14 @@ The properties pinned down here are the ones easy to get subtly wrong:
     the model's "binary"/"continuous" heads, with ``pos_weights`` threaded in,
     masked/NaN positions ignored, and gradient flowing back through the model,
   * ``prepare_binary_per_batch`` applies the sigmoid (scores are probabilities,
-    not logits) and returns a boolean numpy mask,
+    not logits) and returns a boolean numpy mask, while
+    ``prepare_continuous_per_batch`` leaves the raw head output untouched,
   * ``BinaryScores`` selects valid rows *per column*, matches sklearn on the
     kept rows, and emits ``None`` for empty / single-class columns instead of
-    crashing.
+    crashing,
+  * ``ContinuousScores`` selects valid rows *per column* (across many columns,
+    without cross-column leakage), matches sklearn RMSE on the kept rows, and
+    emits ``None`` for a fully-masked column instead of crashing.
 
 The per-element BCE / Huber and the sklearn metric maths are not re-derived --
 the references come from the project's own losses and from sklearn directly.
@@ -32,15 +40,18 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
     roc_auc_score,
+    root_mean_squared_error,
 )
 
 from kuai_recommender.nn.loss import masked_bce, masked_huber
 from kuai_recommender.nn.multitask import MultiTaskModel
 from kuai_recommender.train.train_helper import (
     BinaryScores,
+    ContinuousScores,
     calc_loss,
     inference_batch,
     prepare_binary_per_batch,
+    prepare_continuous_per_batch,
     score2label,
     tensors_to_device,
 )
@@ -343,3 +354,109 @@ def test_dump_metrics_is_json_serializable():
 
     # must serialize even though "b"'s metrics are None
     json.dumps(scores.dump_metrics())
+
+
+# --------------------------------------------------------------------------- #
+# prepare_continuous_per_batch
+# --------------------------------------------------------------------------- #
+def test_prepare_continuous_per_batch_keeps_raw_output_and_returns_numpy():
+    """Regression predictions must NOT be squashed through sigmoid (unlike the
+    binary head) and the mask comes back as boolean numpy."""
+    preds = torch.tensor([[0.0, 3.5], [-2.0, 10.0]])
+    y = torch.tensor([[0.1, 3.4], [-1.9, 9.8]])
+    mask = torch.tensor([[1.0, 0.0], [1.0, 1.0]])  # float mask, as collate emits
+
+    y_true, y_score, out_mask = prepare_continuous_per_batch(preds, y, mask)
+
+    assert isinstance(y_true, np.ndarray)
+    assert isinstance(y_score, np.ndarray)
+    assert out_mask.dtype == bool
+    # raw head output, NOT sigmoid(output)
+    np.testing.assert_array_equal(y_score, preds.numpy())
+    np.testing.assert_array_equal(out_mask, np.array([[True, False], [True, True]]))
+    np.testing.assert_array_equal(y_true, y.numpy())
+
+
+def test_prepare_continuous_per_batch_detaches_from_graph():
+    preds = torch.randn(3, 2, requires_grad=True)
+    y = torch.zeros(3, 2)
+    mask = torch.ones(3, 2)
+
+    # numpy conversion would raise if the tensors were still attached to the graph
+    y_true, y_score, out_mask = prepare_continuous_per_batch(preds, y, mask)
+
+    assert y_score.shape == (3, 2)
+
+
+# --------------------------------------------------------------------------- #
+# ContinuousScores
+# --------------------------------------------------------------------------- #
+def test_continuous_dump_metrics_perfect_prediction_scores_zero():
+    y_true = np.array([[1.0], [2.0], [3.0]])
+    scores = ContinuousScores(["a"])
+    scores.append(y_true, y_true.copy(), np.ones((3, 1), dtype=bool))
+
+    assert scores.dump_metrics()["a"]["rmse"] == 0.0
+
+
+def test_continuous_dump_metrics_matches_sklearn_on_kept_rows():
+    """Per-feature RMSE equals sklearn on exactly the masked-in rows, and each
+    column is scored independently (guards cross-column slice leakage when
+    there is more than one continuous head)."""
+    rng = np.random.default_rng(0)
+    n, f = 50, 3
+    y_true = rng.standard_normal((n, f))
+    y_score = y_true + rng.standard_normal((n, f))  # noisy predictions
+    mask = rng.random((n, f)) > 0.3  # ~70% valid, varies per column
+
+    scores = ContinuousScores([f"feat{i}" for i in range(f)])
+    # split into two batches to also exercise append/concat
+    scores.append(y_true[:20], y_score[:20], mask[:20])
+    scores.append(y_true[20:], y_score[20:], mask[20:])
+
+    metrics = scores.dump_metrics()
+
+    for i in range(f):
+        col = mask[:, i]
+        expected = root_mean_squared_error(y_true[col, i], y_score[col, i])
+        assert metrics[f"feat{i}"]["rmse"] == float(expected)
+
+
+def test_continuous_dump_metrics_masked_rows_are_excluded():
+    """A masked-out row must not affect the column's RMSE -- a perfect
+    prediction stays 0.0 even with a poisoned-but-masked last row."""
+    y_true = np.array([[1.0], [2.0], [3.0]])
+    y_score = np.array([[1.0], [2.0], [99.0]])  # last row contradicts...
+    mask = np.array([[True], [True], [False]])  # ...but is masked out
+
+    scores = ContinuousScores(["a"])
+    scores.append(y_true, y_score, mask)
+
+    assert scores.dump_metrics()["a"]["rmse"] == 0.0
+
+
+def test_continuous_dump_metrics_fully_masked_column_returns_none():
+    y_true = np.array([[1.0], [2.0]])
+    y_score = np.array([[1.5], [2.5]])
+    mask = np.zeros((2, 1), dtype=bool)  # no valid rows -> RMSE undefined
+
+    scores = ContinuousScores(["a"])
+    scores.append(y_true, y_score, mask)
+
+    assert scores.dump_metrics()["a"]["rmse"] is None
+
+
+def test_continuous_dump_metrics_is_json_serializable():
+    import json
+
+    scores = ContinuousScores(["a", "b"])
+    # "b" is fully masked -> its rmse is None
+    y_true = np.array([[1.0, 5.0], [2.0, 6.0]])
+    y_score = np.array([[1.1, 4.0], [1.9, 7.0]])
+    mask = np.array([[True, False], [True, False]])
+    scores.append(y_true, y_score, mask)
+
+    metrics = scores.dump_metrics()
+    assert metrics["b"]["rmse"] is None
+    # rmse must be a plain float, not np.float64, so json can serialize it
+    json.dumps(metrics)
