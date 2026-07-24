@@ -16,7 +16,9 @@ from kuai_recommender.config import (
 )
 from kuai_recommender.train.train_helper import (
     BinaryScores,
+    ContinuousScores,
     prepare_binary_per_batch,
+    prepare_continuous_per_batch,
     get_run_dir,
     get_run_id,
     inference_batch,
@@ -93,6 +95,9 @@ def main():
     for epoch in range(EPOCH):
         total_train_loss = 0.0
         binary_scores = BinaryScores(KuaiPureData.BINARY_COLUMNS_PREPROCESSED)
+        continuous_scores = ContinuousScores(
+            KuaiPureData.CONTINUOUS_COLUMNS_PREPROCESSED
+        )
         model.train()
         for (
             x_batch,
@@ -188,6 +193,11 @@ def main():
                 )
                 binary_scores.append(y_true, y_score, mask)
 
+                y_cont, y_pred, mask_cont = prepare_continuous_per_batch(
+                    outputs["continuous"], y_continuous_batch, mask_continuous_batch
+                )
+                continuous_scores.append(y_cont, y_pred, mask_cont)
+
             avg_train_loss = total_train_loss / len(train_loader)
             avg_val_loss = total_val_loss / len(val_loader)
             print(
@@ -200,7 +210,13 @@ def main():
                 run_dir.mkdir(exist_ok=True)
                 torch.save(model.state_dict(), run_dir / "best.pt")
 
-                metrics = binary_scores.dump_metrics()
+                binary_metrics = binary_scores.dump_metrics()
+                continuous_metrics = continuous_scores.dump_metrics()
+                metrics = {
+                    "binary": binary_metrics,
+                    "continuous": continuous_metrics,
+                }
+
                 with open(run_dir / "metrics.json", "w") as f:
                     json.dump(metrics, f)
 

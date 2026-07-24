@@ -9,6 +9,7 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
     average_precision_score,
+    root_mean_squared_error,
 )
 import numpy as np
 
@@ -21,7 +22,7 @@ def inference_batch(
     model: MultiTaskModel,
     x_batch: torch.Tensor,
     x_cat_batch: torch.Tensor,
-) -> torch.Tensor:
+) -> dict[str, torch.Tensor]:
     return model(x_batch, x_cat_batch)
 
 
@@ -45,13 +46,13 @@ def calc_loss(
     return binary_loss.mean() + cont_loss  # TODO: weight the loss in different tasks
 
 
-class BinaryScores:
-    def __init__(self, features: list[str]):
-        self.features = features
-        n_features = len(features)
-        self.y_score = np.empty((0, n_features))
-        self.y_true = np.empty((0, n_features))
-        self.mask = np.empty((0, n_features), dtype=bool)
+class Scores:
+    def __init__(self, cols: list[str]):
+        self.cols = cols
+        n_cols = len(cols)
+        self.y_score = np.empty((0, n_cols))
+        self.y_true = np.empty((0, n_cols))
+        self.mask = np.empty((0, n_cols), dtype=bool)
 
     def append(self, y_true: np.ndarray, y_score: np.ndarray, mask: np.ndarray) -> None:
         self.y_true = np.concat([self.y_true, y_true])
@@ -59,9 +60,13 @@ class BinaryScores:
         self.mask = np.concat([self.mask, mask])
 
     def dump_metrics(self) -> dict[str, dict[str, float | None]]:
+        raise NotImplementedError
 
+
+class BinaryScores(Scores):
+    def dump_metrics(self) -> dict[str, dict[str, float | None]]:
         res = {}
-        for i, name in enumerate(self.features):
+        for i, name in enumerate(self.cols):
             valid = self.mask[:, i]
             y_true = self.y_true[valid, i]
             if valid.sum() == 0 or y_true.sum() == 0 or y_true.all():
@@ -92,6 +97,20 @@ class BinaryScores:
         return res
 
 
+class ContinuousScores(Scores):
+    def dump_metrics(self) -> dict[str, dict[str, float | None]]:
+        res = {}
+        for i, name in enumerate(self.cols):
+            valid = self.mask[:, i]
+            if valid.sum() == 0:
+                res[name] = {"rmse": None}
+                continue
+            y_true = self.y_true[valid, i]
+            y_score = self.y_score[valid, i]
+            res[name] = {"rmse": float(root_mean_squared_error(y_true, y_score))}
+        return res
+
+
 def score2label(score: np.ndarray, thres: float = 0.5) -> np.ndarray:
     return (score >= thres).astype(int)
 
@@ -102,6 +121,18 @@ def prepare_binary_per_batch(
     mask = mask_binary_batch.bool().detach().cpu().numpy()
     y_true = y_binary_batch.detach().cpu().numpy()
     y_score = torch.sigmoid(outputs).detach().cpu().numpy()
+
+    return y_true, y_score, mask
+
+
+def prepare_continuous_per_batch(
+    outputs: torch.Tensor,
+    y_continuous_batch: torch.Tensor,
+    mask_continuous_batch: torch.Tensor,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    mask = mask_continuous_batch.bool().detach().cpu().numpy()
+    y_true = y_continuous_batch.detach().cpu().numpy()
+    y_score = outputs.detach().cpu().numpy()
 
     return y_true, y_score, mask
 
