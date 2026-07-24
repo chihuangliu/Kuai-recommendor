@@ -14,12 +14,20 @@ from kuai_recommender.config import (
     BATCH_SIZE,
     POS_WEIGHT,
 )
-from kuai_recommender.train.train_helper import inference_and_calc_loss
+from kuai_recommender.train.train_helper import (
+    BinaryScores,
+    prepare_binary_per_batch,
+    get_run_dir,
+    get_run_id,
+    inference_batch,
+    calc_loss,
+    tensors_to_device,
+)
 from kuai_recommender.utils.device import get_device
 from torch import optim
 from torch.utils.data import DataLoader
 import torch
-from kuai_recommender.train.train_helper import get_run_dir, get_run_id
+import json
 
 
 def main():
@@ -84,6 +92,7 @@ def main():
     best_val_loss = float("inf")
     for epoch in range(EPOCH):
         total_train_loss = 0.0
+        binary_scores = BinaryScores(KuaiPureData.BINARY_COLUMNS_PREPROCESSED)
         model.train()
         for (
             x_batch,
@@ -95,16 +104,35 @@ def main():
         ) in train_loader:
             optimizer.zero_grad()
 
-            loss = inference_and_calc_loss(
-                model,
-                device,
+            (
                 x_batch,
                 x_cat_batch,
                 y_binary_batch,
                 y_continuous_batch,
                 mask_binary_batch,
                 mask_continuous_batch,
+            ) = tensors_to_device(
+                x_batch,
+                x_cat_batch,
+                y_binary_batch,
+                y_continuous_batch,
+                mask_binary_batch,
+                mask_continuous_batch,
+                device=device,
+            )
+
+            outputs = inference_batch(
+                model,
+                x_batch,
+                x_cat_batch,
+            )
+            loss = calc_loss(
+                outputs,
                 pos_weights,
+                y_binary_batch,
+                y_continuous_batch,
+                mask_binary_batch,
+                mask_continuous_batch,
             )
             total_train_loss += loss.item()
             loss.backward()
@@ -123,18 +151,42 @@ def main():
                 mask_binary_batch,
                 mask_continuous_batch,
             ) in val_loader:
-                loss = inference_and_calc_loss(
-                    model,
-                    device,
+                (
                     x_batch,
                     x_cat_batch,
                     y_binary_batch,
                     y_continuous_batch,
                     mask_binary_batch,
                     mask_continuous_batch,
+                ) = tensors_to_device(
+                    x_batch,
+                    x_cat_batch,
+                    y_binary_batch,
+                    y_continuous_batch,
+                    mask_binary_batch,
+                    mask_continuous_batch,
+                    device=device,
+                )
+
+                outputs = inference_batch(
+                    model,
+                    x_batch,
+                    x_cat_batch,
+                )
+                loss = calc_loss(
+                    outputs,
                     pos_weights,
+                    y_binary_batch,
+                    y_continuous_batch,
+                    mask_binary_batch,
+                    mask_continuous_batch,
                 )
                 total_val_loss += loss.item()
+
+                y_true, y_score, mask = prepare_binary_per_batch(
+                    outputs["binary"], y_binary_batch, mask_binary_batch
+                )
+                binary_scores.append(y_true, y_score, mask)
 
             avg_train_loss = total_train_loss / len(train_loader)
             avg_val_loss = total_val_loss / len(val_loader)
@@ -147,6 +199,10 @@ def main():
                 run_dir = get_run_dir(run_id)
                 run_dir.mkdir(exist_ok=True)
                 torch.save(model.state_dict(), run_dir / "best.pt")
+
+                metrics = binary_scores.dump_metrics()
+                with open(run_dir / "metrics.json", "w") as f:
+                    json.dump(metrics, f)
 
 
 if __name__ == "__main__":
