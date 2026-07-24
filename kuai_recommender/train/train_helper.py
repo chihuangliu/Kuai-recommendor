@@ -49,15 +49,21 @@ def calc_loss(
 class Scores:
     def __init__(self, cols: list[str]):
         self.cols = cols
-        n_cols = len(cols)
-        self.y_score = np.empty((0, n_cols))
-        self.y_true = np.empty((0, n_cols))
-        self.mask = np.empty((0, n_cols), dtype=bool)
+        self.y_score: list[np.ndarray] = []
+        self.y_true: list[np.ndarray] = []
+        self.mask: list[np.ndarray] = []
 
     def append(self, y_true: np.ndarray, y_score: np.ndarray, mask: np.ndarray) -> None:
-        self.y_true = np.concat([self.y_true, y_true])
-        self.y_score = np.concat([self.y_score, y_score])
-        self.mask = np.concat([self.mask, mask])
+        self.y_true.append(y_true)
+        self.y_score.append(y_score)
+        self.mask.append(mask)
+
+    def concat(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return (
+            np.concatenate(self.y_true),
+            np.concatenate(self.y_score),
+            np.concatenate(self.mask),
+        )
 
     def dump_metrics(self) -> dict[str, dict[str, float | None]]:
         raise NotImplementedError
@@ -65,11 +71,12 @@ class Scores:
 
 class BinaryScores(Scores):
     def dump_metrics(self) -> dict[str, dict[str, float | None]]:
+        y_true, y_score, mask = self.concat()
         res = {}
         for i, name in enumerate(self.cols):
-            valid = self.mask[:, i]
-            y_true = self.y_true[valid, i]
-            if valid.sum() == 0 or y_true.sum() == 0 or y_true.all():
+            valid_i = mask[:, i]
+            y_true_i = y_true[valid_i, i]
+            if valid_i.sum() == 0 or y_true_i.sum() == 0 or y_true_i.all():
                 res[name] = {
                     "roc_auc": None,
                     "recall": None,
@@ -77,15 +84,15 @@ class BinaryScores(Scores):
                     "recall_precision_auc": None,
                 }
                 continue
-            y_score = self.y_score[valid, i]
-            y_label_pred = score2label(y_score)
+            y_score_i = y_score[valid_i, i]
+            y_label_pred = score2label(y_score_i)
             roc_auc = roc_auc_score(
-                y_true,
-                y_score,
+                y_true_i,
+                y_score_i,
             )
-            recall = recall_score(y_true, y_label_pred, zero_division=np.nan)
-            precision = precision_score(y_true, y_label_pred, zero_division=np.nan)
-            recall_precision_auc = average_precision_score(y_true, y_score)
+            recall = recall_score(y_true_i, y_label_pred, zero_division=np.nan)
+            precision = precision_score(y_true_i, y_label_pred, zero_division=np.nan)
+            recall_precision_auc = average_precision_score(y_true_i, y_score_i)
             res[name] = {
                 "roc_auc": float(roc_auc) if not np.isnan(roc_auc) else None,
                 "recall": float(recall) if not np.isnan(recall) else None,
@@ -99,15 +106,17 @@ class BinaryScores(Scores):
 
 class ContinuousScores(Scores):
     def dump_metrics(self) -> dict[str, dict[str, float | None]]:
+        y_true, y_score, mask = self.concat()
+
         res = {}
         for i, name in enumerate(self.cols):
-            valid = self.mask[:, i]
+            valid = mask[:, i]
             if valid.sum() == 0:
                 res[name] = {"rmse": None}
                 continue
-            y_true = self.y_true[valid, i]
-            y_score = self.y_score[valid, i]
-            res[name] = {"rmse": float(root_mean_squared_error(y_true, y_score))}
+            y_true_i = y_true[valid, i]
+            y_score_i = y_score[valid, i]
+            res[name] = {"rmse": float(root_mean_squared_error(y_true_i, y_score_i))}
         return res
 
 
