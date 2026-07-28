@@ -91,10 +91,11 @@ Figure 10.14 and to specific modules being practiced.
             the log-derived rolling video-engagement rate above instead.
 - [v] Skip / dwell-time targets from `play_time_ms` vs `duration_ms`
 - [v] Negative sampling to balance per-task positives (book Fig 10.11)
-- [ ] *(optional)* Wrap features in a **Feast** feature store — same definitions serve
-      training (offline / point-in-time) and serving (online / latest value)
-- [ ] *(optional)* Event-replay script to simulate **streaming** incremental updates
-      (event-time, late data) — no real Kafka broker
+- [ ] *(optional)* Wrap the time-varying features in a **Feast** feature store so **one
+      definition serves both paths** — offline (point-in-time) for training, online (latest
+      value) for serving. See [Feature store & serving](#feature-store--serving-feast) below.
+- [ ] *(optional)* Event-replay script to simulate **streaming** incremental updates to the
+      online store (event-time, late data) — no real Kafka broker. See same section.
 
 **Practices:** pandas `merge_asof`, groupby-rolling · sklearn `StandardScaler`,
 `TfidfVectorizer`/`HashingVectorizer`, `train_test_split` (time-based)
@@ -155,6 +156,84 @@ score blending
 
 ---
 
+## Feature store & serving (Feast)
+
+Optional, high-value block. Goal: take the time-varying features already computed inline in
+Stage 1 and put them behind a **feature store**, so the *same definition* serves training and
+serving. This is where the project practices **train/serve consistency** and, later,
+**streaming** — and it doubles as a rehearsal for *adding a new feature to a live store*
+(text features, Stage 3).
+
+### Two read paths — the core concept
+
+| | **Offline store** | **Online store** |
+|---|---|---|
+| Serves | training / batch eval | live inference (serving) |
+| Question | "feature value **as-of** time T?" (a different T per row) | "each entity's **latest** value **now**?" |
+| Read shape | millions of rows, point-in-time join | few keys, millisecond KV lookup |
+| Backend | `file` (parquet) | **Redis** |
+| Feast API | `get_historical_features` | `get_online_features` |
+
+Without a store, teams compute features one way for training and another for serving → the
+formulas drift → **train/serve skew**. Feast's value is a single `FeatureView` feeding both.
+
+### Scope — what goes in the store
+
+Only the **11 time-varying rolling/cumulative features** (`config.FEATURES`), as three
+FeatureViews by entity: `user_id`, `(user_id, author_id)`, `video_id`. The `*_id_bucket`
+categoricals are a **pure hash of the id** (no state, time-invariant) → hashed on the fly at
+serving, **not** stored. So the online store's job is exactly the 11 features.
+
+### Materialization strategy (decided)
+
+- **Offline source is event-driven**: one feature row per impression `(entity, event_ts,
+  values)`, computed over the **full** log once. This reproduces the current
+  `merge_asof`/rolling output exactly and makes the migration *verifiable* — and it removes
+  the per-split `history=` recompute (point-in-time join slices by `entity_df` instead).
+- **Leakage handling, two-step**:
+  - **Selm A first (done)** — store `f_pre` (window `[T−7D, T)`, current-row excluded, i.e.
+    today's `closed="left"`) with join `feature_ts <= entity_ts`, asserted equal to the old
+    pipeline column-for-column. This is the parity gate.
+  - **Selm B later** — store `f_post` (window includes the event) with **strict `<`** as-of
+    join, moving "exclude current row" from pandas into the join. Training stays leak-free;
+    the online value becomes fresher. ⚠️ needs a stable tiebreak for equal-timestamp events
+    (e.g. one `video_id` shown to many users in the same ms).
+- **Online population = where "interval" belongs**: periodic `materialize_incremental`
+  (batch, staler) **vs** the streaming replay below (per-event, fresher). The gap between
+  either and the exact offline value is **train/serve skew** — a measurable Stage-5 number.
+
+### Streaming replay
+
+Event-replay script feeds impressions in **event-time** order and updates the **online store**
+incrementally (with injected **late data**), as an alternative to periodic materialize. No
+Kafka broker — the point is event-time vs processing-time and freshness, not infra.
+
+### Integration plan (built in parallel — old inline path kept as control until parity passes)
+
+```
+full log ─► features/compute.py (existing rolling logic, re-shaped to tidy source)
+                 └─► data/feature_sources/*.parquet ─► Feast FeatureViews
+                          offline ↓                         ↓ online (Redis)
+                    get_historical_features         materialize / streaming replay
+                          ↓                                  ↓
+                 build_training_set.py               serving/predictor.py
+                    → training parquet               get_online_features → model → scores
+                          ↓
+                  KuaiPureDataset (unchanged)
+```
+
+- [v] **Phase 0** — Stage-1 rolling/cumulative logic extracted into `features/compute.py`,
+  emitting the three tidy sources.
+- [v] **Phase 1** — Feast repo (entities, FeatureViews, FileSource) + **offline parity gate**
+  (Selm A, green on train+val); `KuaiPureDataset.from_parquet` reads the Feast-built parquet.
+- [ ] **Phase 2** — `feast materialize` → online store (Redis) + `serving/predictor.py` online path.
+- [ ] **Phase 3** — streaming replay; text features (Stage 3) as a *new* FeatureView.
+
+**Practices:** Feast `Entity`/`FeatureView`/`FileSource`, `get_historical_features` vs
+`get_online_features`, `materialize`, Redis online store, point-in-time correctness
+
+---
+
 ## Suggested order (each stopping point leaves something runnable)
 
 1. Stage 1 batch point-in-time features (highest concept value)
@@ -191,3 +270,6 @@ Verified against the real files (2026-07-17):
 ## Environment
 
 Use `uv` for all Python (`uv run --with pandas,torch,transformers,scikit-learn ...`).
+
+The Feast block additionally needs `feast` and a running **Redis** for the online store
+(the offline store is `file`/parquet, no service). Serving/streaming steps assume Redis is up.

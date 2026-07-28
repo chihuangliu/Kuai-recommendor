@@ -1,21 +1,24 @@
+from math import isclose
+from pathlib import Path
+from typing import ClassVar
+
 import numpy as np
+import pandas as pd
+import torch
 from torch.utils.data import Dataset
+
 from kuai_recommender.data.utils import (
     DATA_DIR,
     VIDEO_FEATURES_BASIC_PATH,
     KuaiPureDatasetSplits,
-    rng,
     get_bucket_size,
+    rng,
 )
-import pandas as pd
-import torch
-from math import isclose
-from sklearn.utils import murmurhash3_32
-from kuai_recommender.config import FEATURES
+from kuai_recommender.features.compute import set_engagement_targets, set_hash_bucket
 
 
 class KuaiPureData:
-    BINARY_COLUMNS_ORIGINAL = [
+    BINARY_COLUMNS_ORIGINAL: ClassVar[list[str]] = [
         "is_click",
         "is_like",
         "is_follow",
@@ -25,10 +28,25 @@ class KuaiPureData:
         "long_view",
         "is_profile_enter",
     ]
-    BINARY_COLUMNS_PREPROCESSED = BINARY_COLUMNS_ORIGINAL + ["is_skip"]
-    CONTINUOUS_COLUMNS_PREPROCESSED = ["dwell_log"]
-    CATEGORICAL_COLUMNS_PREPROCESSED = ["user_id_bucket", "author_id_bucket"]
-    FEATURE_COLUMNS = FEATURES
+    BINARY_TARGETS: ClassVar[list[str]] = BINARY_COLUMNS_ORIGINAL + ["is_skip"]
+    CONTINUOUS_TARGETS: ClassVar[list[str]] = ["dwell_log"]
+    CATEGORICAL_FEATURES: ClassVar[list[str]] = [
+        "user_id_bucket",
+        "author_id_bucket",
+    ]
+    CONTINUOUS_FEATURES: ClassVar[list[str]] = [
+        "is_click_rolling_user_id",
+        "long_view_rolling_user_id",
+        "is_like_rolling_user_id",
+        "is_profile_enter_rolling_user_id",
+        "is_click_rolling_user_id_author_id",
+        "long_view_rolling_user_id_author_id",
+        "is_like_rolling_user_id_author_id",
+        "is_click_rolling_video_id",
+        "long_view_rolling_video_id",
+        "is_like_rolling_video_id",
+        "is_click_cumulative_video_id",
+    ]
 
     def __init__(
         self,
@@ -48,9 +66,9 @@ class KuaiPureData:
         self._set_user_author_rolling()
         self._set_video_rolling()
         self._set_video_cumulative()
-        self._set_engagement_targets()
-        self._set_user_buckets(get_bucket_size()["user_id"])
-        self._set_author_buckets(get_bucket_size()["author_id"])
+        self.df = set_engagement_targets(self.df)
+        self.df = set_hash_bucket(self.df, "user_id", get_bucket_size()["user_id"])
+        self.df = set_hash_bucket(self.df, "author_id", get_bucket_size()["author_id"])
         self.df = (
             self.df[self.df["is_target"]]
             .drop(columns="is_target")
@@ -103,50 +121,18 @@ class KuaiPureData:
     def _set_video_cumulative(self) -> None:
         self._set_cumulative_columns(group_by="video_id")
 
-    def _set_engagement_targets(self) -> None:
-        dur = self.df["duration_ms"]
-        play = self.df["play_time_ms"]
-        valid = dur > 0
-        completion = (play / dur.where(valid)).clip(upper=1.0)
-        dwell = np.where(valid, np.minimum(play, 2 * dur), np.nan).astype("float32")
-        self.df["is_skip"] = np.where(
-            valid, (completion < 0.5) & (play < 5000), np.nan
-        ).astype("float32")
-        self.df["dwell_log"] = np.log1p(dwell).astype("float32")
-
-    @staticmethod
-    def _hash_to_bucket(value: str | int | float, n_buckets: int) -> int:
-        if pd.isna(value):
-            return 0
-        n_valid_buckets = n_buckets - 1
-        return murmurhash3_32(str(value), positive=True) % n_valid_buckets + 1
-
-    def _set_hash_bucket(self, column: str, n_buckets: int) -> None:
-        self.df[f"{column}_bucket"] = self.df[column].apply(
-            lambda x: self._hash_to_bucket(x, n_buckets)
-        )
-
-    def _set_user_buckets(self, n_buckets: int) -> None:
-        self._set_hash_bucket("user_id", n_buckets)
-
-    def _set_author_buckets(self, n_buckets: int) -> None:
-        self._set_hash_bucket("author_id", n_buckets)
-
 
 class KuaiPureDataset(Dataset):
     def __init__(
         self,
         kuai_pure_data: KuaiPureData,
-        continuous_features: list[str] = KuaiPureData.FEATURE_COLUMNS,
-        categorical_features: list[str] = KuaiPureData.CATEGORICAL_COLUMNS_PREPROCESSED,
+        continuous_features: list[str] = KuaiPureData.CONTINUOUS_FEATURES,
+        categorical_features: list[str] = KuaiPureData.CATEGORICAL_FEATURES,
         neg_keep_frac: float = 1.0,
     ):
         self.df = kuai_pure_data.df
         self.features = continuous_features
-        self.labels = (
-            KuaiPureData.BINARY_COLUMNS_PREPROCESSED
-            + KuaiPureData.CONTINUOUS_COLUMNS_PREPROCESSED
-        )
+        self.labels = KuaiPureData.BINARY_TARGETS + KuaiPureData.CONTINUOUS_TARGETS
         self.cat_features = categorical_features
         self.rng = rng
         self._neg_sampling(neg_keep_frac)
@@ -185,6 +171,28 @@ class KuaiPureDataset(Dataset):
         keep_mask[keep_neg] = True
         self.df = self.df[keep_mask].reset_index(drop=True)
 
+    @classmethod
+    def from_parquet(
+        cls,
+        path: str | Path,
+        *,
+        continuous_features: list[str] | None = None,
+        categorical_features: list[str] | None = None,
+        neg_keep_frac: float = 1.0,
+    ) -> "KuaiPureDataset":
+        if continuous_features is None:
+            continuous_features = KuaiPureData.CONTINUOUS_FEATURES
+        if categorical_features is None:
+            categorical_features = KuaiPureData.CATEGORICAL_FEATURES
+        obj = cls.__new__(cls)
+        obj.df = pd.read_parquet(path).reset_index(drop=True)
+        obj.features = continuous_features
+        obj.labels = KuaiPureData.BINARY_TARGETS + KuaiPureData.CONTINUOUS_TARGETS
+        obj.cat_features = categorical_features
+        obj.rng = rng
+        obj._neg_sampling(neg_keep_frac)
+        return obj
+
 
 def collate_with_masks(
     batch: list[tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]],
@@ -200,8 +208,8 @@ def collate_with_masks(
             [torch.stack([y[c] for y in ys]) for c in cols], dim=1
         )  # [B, len(cols)]
 
-    y_binary_batch = stack_cols(KuaiPureData.BINARY_COLUMNS_PREPROCESSED)
-    y_continuous_batch = stack_cols(KuaiPureData.CONTINUOUS_COLUMNS_PREPROCESSED)
+    y_binary_batch = stack_cols(KuaiPureData.BINARY_TARGETS)
+    y_continuous_batch = stack_cols(KuaiPureData.CONTINUOUS_TARGETS)
     mask_binary_batch = ~torch.isnan(y_binary_batch)
     mask_continuous_batch = ~torch.isnan(y_continuous_batch)
     return (

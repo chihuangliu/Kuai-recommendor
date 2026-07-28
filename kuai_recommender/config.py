@@ -1,18 +1,3 @@
-# data
-FEATURES = [
-    "is_click_rolling_user_id",
-    "long_view_rolling_user_id",
-    "is_like_rolling_user_id",
-    "is_profile_enter_rolling_user_id",
-    "is_click_rolling_user_id_author_id",
-    "long_view_rolling_user_id_author_id",
-    "is_like_rolling_user_id_author_id",
-    "is_click_rolling_video_id",
-    "long_view_rolling_video_id",
-    "is_like_rolling_video_id",
-    "is_click_cumulative_video_id",
-]
-
 # model
 MULTI_TASK_MODEL_HIDDEN_DIM = 128
 MULTI_TASK_MODEL_EMBEDDING_DIM = 128

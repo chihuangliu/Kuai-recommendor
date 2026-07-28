@@ -26,6 +26,11 @@ from kuai_recommender.data.data_pure import (
     collate_with_masks,
 )
 from kuai_recommender.data.utils import next_pow2
+from kuai_recommender.features.compute import (
+    _hash_to_bucket,
+    set_engagement_targets,
+    set_hash_bucket,
+)
 
 TZ = "Asia/Shanghai"
 
@@ -377,11 +382,8 @@ def test_rolling_survives_nan_group_key():
 # that NaN must not reach training.
 
 
-_ALL_LABELS = (
-    KuaiPureData.BINARY_COLUMNS_PREPROCESSED
-    + KuaiPureData.CONTINUOUS_COLUMNS_PREPROCESSED
-)
-_ALL_CAT = KuaiPureData.CATEGORICAL_COLUMNS_PREPROCESSED
+_ALL_LABELS = KuaiPureData.BINARY_TARGETS + KuaiPureData.CONTINUOUS_TARGETS
+_ALL_CAT = KuaiPureData.CATEGORICAL_FEATURES
 
 
 def _fill_missing(df: pd.DataFrame) -> pd.DataFrame:
@@ -445,7 +447,9 @@ def test_nan_targets_pass_through_untouched():
     )
     _, _, y = ds[0]
     assert torch.isnan(y["is_skip"]), "is_skip NaN was zeroed instead of passed through"
-    assert torch.isnan(y["dwell_log"]), "dwell_log NaN was zeroed instead of passed through"
+    assert torch.isnan(y["dwell_log"]), (
+        "dwell_log NaN was zeroed instead of passed through"
+    )
 
 
 # --- KuaiPureDataset negative sampling ---------------------------------------
@@ -530,7 +534,7 @@ def test_neg_sampling_is_reproducible_under_a_reseeded_rng(monkeypatch):
     assert build_once() == build_once()
 
 
-# --- _set_engagement_targets -------------------------------------------------
+# --- compute.set_engagement_targets ------------------------------------------
 # Skip / dwell targets derived row-wise from play_time_ms vs duration_ms.
 #
 #   is_skip   = (completion < 0.5) AND (play_time_ms < 5000)  -- both must be low
@@ -545,8 +549,7 @@ def _make_targets(rows: list[dict]) -> KuaiPureData:
     """Build a KuaiPureData carrying only duration_ms/play_time_ms, then derive targets."""
     df = pd.DataFrame(rows)
     obj = KuaiPureData.__new__(KuaiPureData)
-    obj.df = df
-    obj._set_engagement_targets()
+    obj.df = set_engagement_targets(df)
     return obj
 
 
@@ -642,12 +645,12 @@ def test_invalid_duration_abstains_on_both_targets():
 # --- collate_with_masks -------------------------------------------------------
 # Turns a list of per-sample (x, {label: scalar}) into batched tensors, laid out
 # for a vectorised multi-task loss: binary labels stacked into [B, K] (column
-# order == BINARY_COLUMNS_PREPROCESSED), continuous into [B, C], plus a validity
+# order == BINARY_TARGETS), continuous into [B, C], plus a validity
 # mask per target group. The mask is the whole point: is_skip/dwell_log are NaN
 # when duration<=0, and a NaN target must be *masked*, not silently zeroed.
 
-_BIN_COLS = KuaiPureData.BINARY_COLUMNS_PREPROCESSED
-_CONT_COLS = KuaiPureData.CONTINUOUS_COLUMNS_PREPROCESSED
+_BIN_COLS = KuaiPureData.BINARY_TARGETS
+_CONT_COLS = KuaiPureData.CONTINUOUS_TARGETS
 
 
 def _sample(
@@ -657,7 +660,9 @@ def _sample(
     feature vector, x_cat the long categorical bucket ids (defaults to zeros), and
     y maps every label to a scalar tensor (unset labels -> 0)."""
     x = torch.tensor(feature_vec, dtype=torch.float32)
-    x_cat = torch.tensor(cat if cat is not None else [0] * len(_ALL_CAT), dtype=torch.long)
+    x_cat = torch.tensor(
+        cat if cat is not None else [0] * len(_ALL_CAT), dtype=torch.long
+    )
     y = {
         c: torch.tensor(float(labels.get(c, 0.0)), dtype=torch.float32)
         for c in _ALL_LABELS
@@ -679,7 +684,7 @@ def test_collate_shapes_and_dtypes():
 
 
 def test_collate_binary_column_order_matches_preprocessed():
-    """Column j of y_binary is BINARY_COLUMNS_PREPROCESSED[j] -- not insertion order."""
+    """Column j of y_binary is BINARY_TARGETS[j] -- not insertion order."""
     batch = [_sample([0.0], is_click=1.0, is_hate=1.0)]
     _, _, y_bin, _, _, _ = collate_with_masks(batch)
 
@@ -733,11 +738,11 @@ def test_collate_does_not_zero_the_masked_target():
 # --- categorical (hash-bucket) features ---------------------------------------
 # user_id / author_id are folded into a fixed number of hash buckets so the model
 # can embed high-cardinality ids. __getitem__ emits them as a long tensor and
-# collate stacks them to [B, C]; column order == CATEGORICAL_COLUMNS_PREPROCESSED.
+# collate stacks them to [B, C]; column order == CATEGORICAL_FEATURES.
 
 
 def test_getitem_returns_categorical_bucket_tensor():
-    """x_cat carries the bucket ids as int64, in CATEGORICAL_COLUMNS_PREPROCESSED order."""
+    """x_cat carries the bucket ids as int64, in CATEGORICAL_FEATURES order."""
     ds = _make_dataset(
         [{"rate": 0.25, "is_click": 1, "user_id_bucket": 3, "author_id_bucket": 7}],
         features=["rate"],
@@ -772,7 +777,7 @@ def test_next_pow2_rounds_up_to_power_of_two(n, expected):
     assert next_pow2(n) == expected
 
 
-# --- KuaiPureData._hash_to_bucket / _set_hash_bucket -------------------------
+# --- compute._hash_to_bucket / compute.set_hash_bucket -----------------------
 # Bucket 0 is reserved for missing ids; real ids map to [1, n_buckets-1] so the
 # index is always a valid row of an nn.Embedding(n_buckets, ...). str()-normalising
 # before hashing is what lets numpy scalars (df.apply passes np.int64) and NaN
@@ -782,7 +787,7 @@ def test_next_pow2_rounds_up_to_power_of_two(n, expected):
 @pytest.mark.parametrize("missing", [float("nan"), np.nan, pd.NA, None])
 def test_hash_to_bucket_reserves_zero_for_missing(missing):
     """Any missing value maps to the reserved bucket 0, never raising."""
-    assert KuaiPureData._hash_to_bucket(missing, 16) == 0
+    assert _hash_to_bucket(missing, 16) == 0
 
 
 def test_hash_to_bucket_stays_in_valid_embedding_range():
@@ -790,23 +795,19 @@ def test_hash_to_bucket_stays_in_valid_embedding_range():
     n_buckets (which would index past nn.Embedding(n_buckets))."""
     n_buckets = 8
     for v in range(2000):
-        b = KuaiPureData._hash_to_bucket(v, n_buckets)
+        b = _hash_to_bucket(v, n_buckets)
         assert 1 <= b <= n_buckets - 1, f"value {v} -> out-of-range bucket {b}"
 
 
 def test_hash_to_bucket_is_deterministic():
     """The same id always hashes to the same bucket (stable across splits/epochs)."""
-    assert KuaiPureData._hash_to_bucket(12345, 64) == KuaiPureData._hash_to_bucket(
-        12345, 64
-    )
+    assert _hash_to_bucket(12345, 64) == _hash_to_bucket(12345, 64)
 
 
 def test_hash_to_bucket_normalises_numpy_and_python_ints():
     """np.int64 (what a df column yields under .apply) and a plain int hash alike,
     because the value is str()-normalised before hashing."""
-    assert KuaiPureData._hash_to_bucket(np.int64(777), 64) == KuaiPureData._hash_to_bucket(
-        777, 64
-    )
+    assert _hash_to_bucket(np.int64(777), 64) == _hash_to_bucket(777, 64)
 
 
 def _bucket_obj(values: list, column: str = "user_id") -> KuaiPureData:
@@ -818,7 +819,7 @@ def _bucket_obj(values: list, column: str = "user_id") -> KuaiPureData:
 def test_set_hash_bucket_handles_int64_column():
     """Regression: an int64 id column buckets without error and stays in range."""
     obj = _bucket_obj([1, 2, 3, 4, 5])
-    obj._set_hash_bucket("user_id", 16)
+    set_hash_bucket(obj.df, "user_id", 16)
     buckets = obj.df["user_id_bucket"]
     assert buckets.between(1, 15).all()
 
@@ -827,7 +828,7 @@ def test_set_hash_bucket_maps_nan_to_zero():
     """Regression: an author_id NaN (video missing from the basic feature file) buckets
     to the reserved 0, while real authors get a non-zero bucket."""
     obj = _bucket_obj([10.0, float("nan"), 20.0], column="author_id")
-    obj._set_hash_bucket("author_id", 16)
+    set_hash_bucket(obj.df, "author_id", 16)
     buckets = obj.df["author_id_bucket"].tolist()
     assert buckets[1] == 0
     assert buckets[0] != 0 and buckets[2] != 0
@@ -836,19 +837,19 @@ def test_set_hash_bucket_maps_nan_to_zero():
 def test_set_hash_bucket_is_stable_per_id():
     """Repeated ids in a column all resolve to the same bucket."""
     obj = _bucket_obj([42, 7, 42, 7, 42])
-    obj._set_hash_bucket("user_id", 32)
+    set_hash_bucket(obj.df, "user_id", 32)
     b = obj.df["user_id_bucket"].tolist()
     assert b[0] == b[2] == b[4]  # every 42
     assert b[1] == b[3]  # every 7
 
 
 def test_set_user_and_author_buckets_write_categorical_columns():
-    """_set_user_buckets / _set_author_buckets populate exactly the columns
+    """set_hash_bucket on user_id / author_id populates exactly the columns
     __getitem__ reads as categorical features."""
     obj = KuaiPureData.__new__(KuaiPureData)
     obj.df = pd.DataFrame({"user_id": [1, 2], "author_id": [10.0, float("nan")]})
-    obj._set_user_buckets(16)
-    obj._set_author_buckets(16)
+    set_hash_bucket(obj.df, "user_id", 16)
+    set_hash_bucket(obj.df, "author_id", 16)
     for col in _ALL_CAT:
         assert col in obj.df.columns
     # NaN author still resolves to the reserved bucket, not a crash.
