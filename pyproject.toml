@@ -5,7 +5,7 @@ description = ""
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "feast>=0.65.0",
+    "feast[redis]>=0.65.0",
     "pandas>=2.2,<3",
     "pyarrow>=25.0.0",
     "scikit-learn>=1.9.0",

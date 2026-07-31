@@ -20,7 +20,7 @@ config = RepoConfig(
     provider="local",
     registry=str(FEAST_DIR / "registry.db"),
     offline_store={"type": "file"},
-    online_store={"type": "sqlite", "path": str(FEAST_DIR / "online_store.db")},
+    online_store={"type": "redis", "connection_string": "localhost:6379"},
     entity_key_serialization_version=3,
 )
 
