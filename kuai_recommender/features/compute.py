@@ -92,11 +92,11 @@ def set_engagement_targets(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def set_hash_bucket(df: pd.DataFrame, column: str, n_buckets: int) -> pd.DataFrame:
-    df[f"{column}_bucket"] = df[column].apply(lambda x: _hash_to_bucket(x, n_buckets))
+    df[f"{column}_bucket"] = df[column].apply(lambda x: hash_to_bucket(x, n_buckets))
     return df
 
 
-def _hash_to_bucket(value: str | float, n_buckets: int) -> int:
+def hash_to_bucket(value: str | float, n_buckets: int) -> int:
     if pd.isna(value):
         return 0
     n_valid_buckets = n_buckets - 1

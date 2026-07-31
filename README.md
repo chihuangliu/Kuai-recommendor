@@ -37,32 +37,38 @@ The biased (standard) and unbiased (random) logs overlap in time for Apr 22–Ma
 parallel collection is by design and drives the split.
 
 ```
-          4/08 ─────────── 4/21 │ 4/22 ─────────── 5/08
-standard   [===== train =====]   │ [== val ==]
- random                          │ [===== test / online =====]
+          4/08 ────── 4/19 │4/20–21│ 4/22 ─────────── 5/08
+standard   [=== train ===]  │ [val] │ [== test:biased ==]
+ random                             │ [== test:random ==]
 ```
 
 | Role | Data | Why |
 |---|---|---|
-| **Training** | standard 4/08–4/21 (1.14M, biased) | Fit model params on the earlier window; features computed point-in-time |
-| **Validation** | standard 4/22–5/08 (295K, biased) | Model selection / early stopping / loss-weight tuning. Same biased distribution as training → honest measure of the learned task |
-| **Test (unbiased)** | random 4/22–5/08 (1.19M, unbiased) | Headline metric. An unbiased offline eval set for estimating ranking quality of a *new* policy — NOT a simulation of production traffic. Never touched during training/tuning |
+| **Training** | standard 4/08–4/19 (~1.10M, biased) | Fit model params on the earliest window; features computed point-in-time |
+| **Validation** | standard 4/20–4/21 (~41K, biased) | Hyperparam / early-stop / loss-weight tuning. Train-tail, **time-disjoint from the eval window** → its selection optimism can't leak into either eval arm |
+| **Test — biased arm** | standard 4/22–5/08 (295K, biased) | Biased arm of the bias gap; held out from selection. Same distribution as training → honest measure of the learned task |
+| **Test — unbiased arm** | random 4/22–5/08 (1.19M, unbiased) | Headline + unbiased arm. Ranking quality of a *new* policy — NOT a production-traffic sim. Never touched during training/tuning |
 
 Design rules:
 
 - **Split by time, not randomly** — point-in-time features + evolving user behavior mean a
-  random split leaks the future into the past. Train = earlier, val = later.
-- **Val and test share the same period** (Apr 22–May 8), differing only in exposure policy.
-  So `val_AUC − test_AUC` isolates selection/position bias with time held constant
+  random split leaks the future into the past. Splits run strictly train < selection < eval.
+- **Validation is carved from the train tail** (4/20–4/21, ~3.6% — traffic is front-loaded so
+  the tail is cheap), time-disjoint from the eval window so hyperparam/early-stop optimism
+  can't couple into the bias gap or headline. Early-stop on the dense heads (is_click /
+  long_view, ~13–18k positives); the sparse heads (hate/follow/forward) are too rare to steer
+  selection at any split size — judge those on the large random arm instead.
+- **The two eval arms share the same period** (Apr 22–May 8), differing only in exposure
+  policy. So `test(biased)_AUC − test(random)_AUC` isolates selection/position bias with time held constant
   (Stage 5). The gap is large by construction: logged CTR is **46%** (biased) vs **17.6%**
   (random) — the production recommender only shows likely clicks, inflating its CTR.
-- **All three use point-in-time features** from full interaction history up to each
+- **All splits use point-in-time features** from full interaction history up to each
   impression's timestamp, regardless of which policy generated it — matching what an online
   store would serve, and keeping offline/online feature definitions consistent.
-- **Negative sampling on training only.** Val/test keep the natural class balance, or the
+- **Negative sampling on training only.** The eval arms keep the natural class balance, or the
   metrics are meaningless.
-- **Cold start is real:** the random log has 27,285 users vs training's 26,210, so val/test
-  contain unseen users/videos → embedding cold-start. A realistic condition, not a bug.
+- **Cold start is real:** the random log has 27,285 users vs training's 26,210, so the eval
+  arms contain unseen users/videos → embedding cold-start. A realistic condition, not a bug.
 
 ---
 

@@ -27,7 +27,7 @@ from kuai_recommender.data.data_pure import (
 )
 from kuai_recommender.data.utils import next_pow2
 from kuai_recommender.features.compute import (
-    _hash_to_bucket,
+    hash_to_bucket,
     set_engagement_targets,
     set_hash_bucket,
 )
@@ -787,7 +787,7 @@ def test_next_pow2_rounds_up_to_power_of_two(n, expected):
 @pytest.mark.parametrize("missing", [float("nan"), np.nan, pd.NA, None])
 def test_hash_to_bucket_reserves_zero_for_missing(missing):
     """Any missing value maps to the reserved bucket 0, never raising."""
-    assert _hash_to_bucket(missing, 16) == 0
+    assert hash_to_bucket(missing, 16) == 0
 
 
 def test_hash_to_bucket_stays_in_valid_embedding_range():
@@ -795,19 +795,19 @@ def test_hash_to_bucket_stays_in_valid_embedding_range():
     n_buckets (which would index past nn.Embedding(n_buckets))."""
     n_buckets = 8
     for v in range(2000):
-        b = _hash_to_bucket(v, n_buckets)
+        b = hash_to_bucket(v, n_buckets)
         assert 1 <= b <= n_buckets - 1, f"value {v} -> out-of-range bucket {b}"
 
 
 def test_hash_to_bucket_is_deterministic():
     """The same id always hashes to the same bucket (stable across splits/epochs)."""
-    assert _hash_to_bucket(12345, 64) == _hash_to_bucket(12345, 64)
+    assert hash_to_bucket(12345, 64) == hash_to_bucket(12345, 64)
 
 
 def test_hash_to_bucket_normalises_numpy_and_python_ints():
     """np.int64 (what a df column yields under .apply) and a plain int hash alike,
     because the value is str()-normalised before hashing."""
-    assert _hash_to_bucket(np.int64(777), 64) == _hash_to_bucket(777, 64)
+    assert hash_to_bucket(np.int64(777), 64) == hash_to_bucket(777, 64)
 
 
 def _bucket_obj(values: list, column: str = "user_id") -> KuaiPureData:

@@ -1,5 +1,7 @@
-from torch import nn
+from pathlib import Path
+
 import torch
+from torch import nn
 
 
 class MultiTaskModel(nn.Module):
@@ -43,3 +45,17 @@ class MultiTaskModel(nn.Module):
             task: layer(shared_output) for task, layer in self.task_layers.items()
         }
         return outputs
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        checkpoint_path: str | Path,
+        input_dim: int,
+        hidden_dim: int,
+        embedding_dims: list[tuple[int, int]],
+        output_dims: dict[str, int],
+    ):
+        instance = cls(input_dim, hidden_dim, embedding_dims, output_dims)
+        checkpoint = torch.load(checkpoint_path, map_location=torch.device("cpu"))
+        instance.load_state_dict(checkpoint["model_state_dict"])
+        return instance

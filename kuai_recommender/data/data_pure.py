@@ -1,3 +1,4 @@
+from datetime import datetime
 from math import isclose
 from pathlib import Path
 from typing import ClassVar
@@ -179,6 +180,8 @@ class KuaiPureDataset(Dataset):
         continuous_features: list[str] | None = None,
         categorical_features: list[str] | None = None,
         neg_keep_frac: float = 1.0,
+        start_dt: datetime | None = None,
+        end_dt: datetime | None = None,
     ) -> "KuaiPureDataset":
         if continuous_features is None:
             continuous_features = KuaiPureData.CONTINUOUS_FEATURES
@@ -186,6 +189,10 @@ class KuaiPureDataset(Dataset):
             categorical_features = KuaiPureData.CATEGORICAL_FEATURES
         obj = cls.__new__(cls)
         obj.df = pd.read_parquet(path).reset_index(drop=True)
+        if start_dt is not None:
+            obj.df = obj.df[obj.df["event_timestamp"] >= start_dt]
+        if end_dt is not None:
+            obj.df = obj.df[obj.df["event_timestamp"] < end_dt]
         obj.features = continuous_features
         obj.labels = KuaiPureData.BINARY_TARGETS + KuaiPureData.CONTINUOUS_TARGETS
         obj.cat_features = categorical_features

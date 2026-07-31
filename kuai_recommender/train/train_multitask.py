@@ -1,4 +1,6 @@
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import torch
 from torch import optim
@@ -8,7 +10,6 @@ from kuai_recommender.config import (
     BATCH_SIZE,
     EPOCH,
     LEARNING_RATE,
-    MULTI_TASK_MODEL_EMBEDDING_DIM,
     MULTI_TASK_MODEL_HIDDEN_DIM,
     NEG_KEEP_FRAC,
     POS_WEIGHT,
@@ -18,7 +19,7 @@ from kuai_recommender.data.data_pure import (
     KuaiPureDataset,
     collate_with_masks,
 )
-from kuai_recommender.data.utils import DATA_DIR, KuaiPureDatasetSplits, get_bucket_size
+from kuai_recommender.data.utils import KuaiPureDatasetSplits
 from kuai_recommender.features.common import get_training_file_path
 from kuai_recommender.nn.multitask import MultiTaskModel
 from kuai_recommender.train.train_helper import (
@@ -33,16 +34,22 @@ from kuai_recommender.train.train_helper import (
     tensors_to_device,
 )
 from kuai_recommender.utils.device import get_device
+from kuai_recommender.utils.model_dims import get_model_dims
 
 
 def main():
+    cutoff_time = datetime.strptime("2022-04-20", "%Y-%m-%d").replace(
+        tzinfo=ZoneInfo("Asia/Shanghai")
+    )
     # setup data
     train_dataset = KuaiPureDataset.from_parquet(
-        get_training_file_path(KuaiPureDatasetSplits.TRAIN), neg_keep_frac=NEG_KEEP_FRAC
+        get_training_file_path(KuaiPureDatasetSplits.TRAIN),
+        neg_keep_frac=NEG_KEEP_FRAC,
+        end_dt=cutoff_time,
     )
-
     val_dataset = KuaiPureDataset.from_parquet(
-        get_training_file_path(KuaiPureDatasetSplits.VAL)
+        get_training_file_path(KuaiPureDatasetSplits.TRAIN),
+        start_dt=cutoff_time,
     )
 
     train_loader = DataLoader(
@@ -60,19 +67,11 @@ def main():
     )
 
     # setup model
-    input_dim = len(KuaiPureData.CONTINUOUS_FEATURES)
-    embedding_dims = [
-        (get_bucket_size()[id_col], MULTI_TASK_MODEL_EMBEDDING_DIM)
-        for id_col in ["user_id", "author_id"]
-    ]
-    output_dims = {
-        "binary": len(KuaiPureData.BINARY_TARGETS),
-        "continuous": len(KuaiPureData.CONTINUOUS_TARGETS),
-    }
+    input_dim, hidden_dim, embedding_dims, output_dims = get_model_dims()
     device = get_device()
-    model = MultiTaskModel(
-        input_dim, MULTI_TASK_MODEL_HIDDEN_DIM, embedding_dims, output_dims
-    ).to(device)
+    model = MultiTaskModel(input_dim, hidden_dim, embedding_dims, output_dims).to(
+        device
+    )
 
     # train
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
@@ -199,7 +198,12 @@ def main():
                 best_val_loss = avg_val_loss
                 run_dir = get_run_dir(run_id)
                 run_dir.mkdir(exist_ok=True)
-                torch.save(model.state_dict(), run_dir / "best.pt")
+                states = {
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "schedular_state_dict": schedular.state_dict(),
+                }
+                torch.save(states, run_dir / "best.pt")
 
                 binary_metrics = binary_scores.dump_metrics()
                 continuous_metrics = continuous_scores.dump_metrics()

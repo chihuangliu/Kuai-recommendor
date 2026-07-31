@@ -2,11 +2,11 @@ import pandas as pd
 
 from kuai_recommender.data.utils import KuaiPureDatasetSplits, get_bucket_size
 
-from .common import TRAINING_DIR, get_training_file_path
-from .compute import set_engagement_targets, set_hash_bucket
-from .entity_df import build_impression_frame
-from .feature_repo.store import store
-from .schema import USER_AUTHOR_FEATURES, USER_FEATURES, VIDEO_FEATURES
+from ..common import TRAINING_DIR, get_training_file_path
+from ..compute import set_engagement_targets, set_hash_bucket
+from ..entity_df import build_impression_frame
+from ..feature_repo.store import store
+from ..schema import USER_AUTHOR_FEATURES, USER_FEATURES, VIDEO_FEATURES
 
 
 def build_history_frame(impression_df: pd.DataFrame) -> pd.DataFrame:
