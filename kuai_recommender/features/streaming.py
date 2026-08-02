@@ -82,6 +82,13 @@ class RunningCountAgg:
         return res
 
 
+class ServedFeatures(NamedTuple):
+    user: np.ndarray
+    user_author: np.ndarray
+    video: np.ndarray
+    video_cum: np.ndarray
+
+
 class WindowFeatureAgg:
     def __init__(self, window: pd.Timedelta):
         self.user_avg = WindowAvg(DictStateStore(), window)
@@ -94,20 +101,16 @@ class WindowFeatureAgg:
         *,
         ts: pd.Timestamp,
         user_id: int,
-        author_id: float,
+        author_id: int,
         video_id: int,
         signal: np.ndarray,
         is_click: int,
-    ) -> dict[str, np.ndarray]:
-        served = {
-            "user": self.user_avg.step(user_id, ts, signal),
-            "video": self.video_avg.step(video_id, ts, signal),
-            "video_cum": np.array(
+    ) -> ServedFeatures:
+        return ServedFeatures(
+            user=self.user_avg.step(user_id, ts, signal),
+            user_author=self.ua_avg.step((user_id, author_id), ts, signal),
+            video=self.video_avg.step(video_id, ts, signal),
+            video_cum=np.array(
                 [self.video_cum.step(video_id, is_click)], dtype="int32"
             ),
-        }
-        if not pd.isna(author_id):
-            served["user_author"] = self.ua_avg.step(
-                (user_id, int(author_id)), ts, signal
-            )
-        return served
+        )

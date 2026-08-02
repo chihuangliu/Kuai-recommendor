@@ -18,7 +18,7 @@ from ..streaming import WindowFeatureAgg
 def warmup() -> WindowFeatureAgg:
     base_df = build_base_frame().sort_values("dt")
     user_ids = base_df["user_id"].to_numpy(dtype=np.int64)
-    author_ids = base_df["author_id"].to_numpy()
+    author_ids = base_df["author_id"].to_numpy(dtype=np.int64)
     video_ids = base_df["video_id"].to_numpy(dtype=np.int64)
     is_clicks = base_df["is_click"].to_numpy(dtype=np.int8)
     dts = list(base_df["dt"])
@@ -63,11 +63,9 @@ def replay(
                     [getattr(event, f) for f in BINARY_FEATURES], dtype=np.float32
                 ),
             )
-            latest["user"][user_id] = (dt, served["user"])
-            latest["video"][video_id] = (dt, served["video"], served["video_cum"])
-
-            if not pd.isna(author_id):
-                latest["ua"][(user_id, author_id)] = (dt, served["user_author"])
+            latest["user"][user_id] = (dt, served.user)
+            latest["video"][video_id] = (dt, served.video, served.video_cum)
+            latest["ua"][(user_id, author_id)] = (dt, served.user_author)
 
         def _feat2dict(
             signal: np.ndarray, feature_names: list[str]
@@ -93,7 +91,7 @@ def replay(
                 [
                     {
                         "user_id": user_id,
-                        "author_id": int(author_id),
+                        "author_id": author_id,
                         "dt": dt,
                         **_feat2dict(features, USER_AUTHOR_FEATURES),
                     }

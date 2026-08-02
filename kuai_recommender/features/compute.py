@@ -4,8 +4,8 @@ from sklearn.utils import murmurhash3_32
 
 from kuai_recommender.data.utils import (
     DATA_DIR,
-    VIDEO_FEATURES_BASIC_PATH,
     KuaiPureDatasetSplits,
+    attach_author_id,
 )
 from kuai_recommender.features.schema import (
     BINARY_FEATURES,
@@ -22,10 +22,7 @@ def build_base_frame(
     df["dt"] = pd.to_datetime(df["time_ms"], unit="ms", utc=True).dt.tz_convert(
         "Asia/Shanghai"
     )
-    df_video = pd.read_csv(VIDEO_FEATURES_BASIC_PATH, usecols=["author_id", "video_id"])
-    df = df.merge(df_video, on="video_id", how="left")
-
-    return df
+    return attach_author_id(df)
 
 
 def build_user_source(base_frame: pd.DataFrame) -> pd.DataFrame:
@@ -35,9 +32,7 @@ def build_user_source(base_frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_user_author_source(base_frame: pd.DataFrame) -> pd.DataFrame:
-    base_frame = base_frame.dropna(subset=["author_id"])
     df = _set_rolling_columns(base_frame, ["user_id", "author_id"])
-    df["author_id"] = df["author_id"].astype("int64")
     cols = ["dt", "user_id", "author_id"] + USER_AUTHOR_FEATURES
     return df[cols]
 

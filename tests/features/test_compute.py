@@ -16,15 +16,15 @@ cumulative maths is covered in tests/data/test_data_pure.py):
     impression NaN, no self-leakage),
   * the video source actually produces the cumulative column (regression: a str
     passed where a list of columns was expected iterates characters -> KeyError),
-  * build_user_author_source drops NaN-author rows *before* rolling (so the
-    entity key is never NaN) and hands back an integer author_id, and
+  * build_user_author_source carries an integer author_id straight through --
+    ``attach_author_id`` already guarantees the key is total, so this layer does
+    no NaN handling of its own (see tests/data/test_attach_author_id.py), and
   * the builders don't mutate the shared base frame (each takes its own sorted
     copy), so all three can run off one base_frame.
 """
 
 import math
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -127,30 +127,28 @@ def test_user_author_source_carries_both_join_keys():
     assert list(out.columns) == ["dt", "user_id", "author_id"] + USER_AUTHOR_FEATURES
 
 
-def test_user_author_source_drops_nan_author_before_rolling():
-    """Rows whose video has no author (NaN join key) are excluded from this table."""
+def test_user_author_source_rolls_per_author_pair():
+    """Affinity is scoped to the (user, author) pair, not to the user alone."""
     out = build_user_author_source(
         _base(
             [
                 {"user_id": 1, "video_id": 1, "author_id": 10, "dt": "2022-04-08", "is_click": 1},
                 {"user_id": 1, "video_id": 2, "author_id": 10, "dt": "2022-04-09", "is_click": 0},
-                {"user_id": 1, "video_id": 3, "author_id": np.nan, "dt": "2022-04-08", "is_click": 1},
-                {"user_id": 1, "video_id": 4, "author_id": np.nan, "dt": "2022-04-09", "is_click": 1},
+                {"user_id": 1, "video_id": 3, "author_id": 20, "dt": "2022-04-08", "is_click": 1},
+                {"user_id": 1, "video_id": 4, "author_id": 20, "dt": "2022-04-09", "is_click": 1},
             ]
         )
     )
-    # only the two author=10 rows survive; the NaN-author rows are gone
-    assert len(out) == 2
-    assert out["author_id"].notna().all()
-    # affinity is per (user, author): [NaN first, prior=[1]->1.0]
+    assert len(out) == 4
+    # per (user, author): [NaN first, prior=[1]->1.0] then [NaN first, prior=[1]->1.0]
     _assert_seq(
         _seq(out, ["user_id", "author_id"], "is_click_rolling_user_id_author_id"),
-        [None, 1.0],
+        [None, 1.0, None, 1.0],
     )
 
 
 def test_user_author_source_author_key_is_integer():
-    """author_id is cast back to an int key (the left-join floated it via NaN)."""
+    """The int64 key from attach_author_id survives the groupby/rolling round trip."""
     out = build_user_author_source(
         _base(
             [

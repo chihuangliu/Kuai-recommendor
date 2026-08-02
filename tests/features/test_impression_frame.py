@@ -6,13 +6,13 @@ Because that frame is consumed by name in two places, a stray or missing column
 silently breaks either retrieval or label building. This test pins the exact
 column contract, plus the invariants of the two *derived* columns:
 
-  * author_id is nullable ``Int64`` -- videos with no author survive as <NA>
-    (not a float64 NaN), and the (user_id, author_id) retrieval key never drops
-    on a dtype mismatch;
+  * author_id is a plain non-null ``int64`` -- ``attach_author_id`` rejects an
+    unmatched video rather than propagating <NA>, so the (user_id, author_id)
+    retrieval key never drops on a dtype mismatch;
   * event_timestamp is tz-aware Asia/Shanghai, derived row-for-row from time_ms;
 
 and that the video_features lookup is a join, not a fan-out (one row per
-impression). Uses VAL (the smaller standard split) -- the code path is
+impression). Uses TEST_STANDARD (the smaller standard split) -- the code path is
 split-independent, so the cheaper split exercises the same contract.
 """
 
@@ -27,7 +27,7 @@ from kuai_recommender.data.utils import (
 from kuai_recommender.features.entity_df import build_impression_frame
 from kuai_recommender.features.schema import BINARY_FEATURES, ENGAGEMENT_INPUT_COLUMNS
 
-_SPLIT = KuaiPureDatasetSplits.VAL
+_SPLIT = KuaiPureDatasetSplits.TEST_STANDARD
 
 pytestmark = pytest.mark.skipif(
     not (DATA_DIR.exists() and VIDEO_FEATURES_BASIC_PATH.exists()),
@@ -55,9 +55,10 @@ def test_columns_are_exactly_the_impression_contract(frame):
     assert set(frame.columns) == EXPECTED_COLUMNS
 
 
-def test_author_id_is_nullable_int64(frame):
-    """Nullable so no-author videos stay <NA>, and the ua join key dtype is stable."""
-    assert frame["author_id"].dtype == "Int64"
+def test_author_id_is_non_null_int64(frame):
+    """Total int64: an unmatched video raises upstream, so no <NA> reaches here."""
+    assert frame["author_id"].dtype == "int64"
+    assert frame["author_id"].notna().all()
 
 
 def test_event_timestamp_is_tz_aware_shanghai_from_time_ms(frame):

@@ -10,8 +10,8 @@ from torch.utils.data import Dataset
 
 from kuai_recommender.data.utils import (
     DATA_DIR,
-    VIDEO_FEATURES_BASIC_PATH,
     KuaiPureDatasetSplits,
+    attach_author_id,
     get_bucket_size,
     rng,
 )
@@ -80,10 +80,7 @@ class KuaiPureData:
         return pd.read_csv(DATA_DIR / name)
 
     def _join_video_features(self) -> None:
-        video_features_basic = pd.read_csv(VIDEO_FEATURES_BASIC_PATH)
-        self.df = self.df.merge(
-            video_features_basic[["video_id", "author_id"]], on="video_id", how="left"
-        )
+        self.df = attach_author_id(self.df)
 
     def _set_rolling_columns(
         self, group_by: list[str] | str, window: str = "7D"

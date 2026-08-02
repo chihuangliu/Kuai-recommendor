@@ -42,12 +42,35 @@ def next_pow2(n: int) -> int:
 
 
 @cache
+def _author_lookup() -> pd.DataFrame:
+    return pd.read_csv(VIDEO_FEATURES_BASIC_PATH, usecols=["video_id", "author_id"])
+
+
+def attach_author_id(df: pd.DataFrame) -> pd.DataFrame:
+    """Join ``author_id`` onto an impression frame as a non-null ``int64`` column.
+
+    This is the single place the video -> author join happens, so ``author_id`` is
+    total everywhere downstream: no NaN checks, no float/int round trips. A missing
+    author means ``video_features_basic`` is out of sync with the log, which is a
+    data bug rather than a row to silently drop.
+    """
+    out = df.merge(_author_lookup(), on="video_id", how="left", validate="many_to_one")
+    missing = out["author_id"].isna()
+    if missing.any():
+        unknown = sorted(out.loc[missing, "video_id"].unique())
+        raise ValueError(
+            f"{missing.sum()} impressions over {len(unknown)} video_id(s) have no "
+            f"author_id; video_features_basic is out of sync with the log. "
+            f"First unknown video_ids: {unknown[:10]}"
+        )
+    out["author_id"] = out["author_id"].astype("int64")
+    return out
+
+
+@cache
 def get_bucket_size() -> dict[str, int]:
     df = pd.read_csv(DATA_DIR / KuaiPureDatasetSplits.TRAIN)[["user_id", "video_id"]]
-    video_features_basic = pd.read_csv(VIDEO_FEATURES_BASIC_PATH)
-    df = df.merge(
-        video_features_basic[["video_id", "author_id"]], on="video_id", how="left"
-    )
+    df = attach_author_id(df)
     return {
         "user_id": next_pow2(4 * df["user_id"].nunique()),
         "author_id": next_pow2(4 * df["author_id"].nunique()),
