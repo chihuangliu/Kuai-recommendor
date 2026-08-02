@@ -193,9 +193,14 @@ serving, **not** stored. So the online store's job is exactly the 11 features.
 ### Materialization strategy (decided)
 
 - **Offline source is event-driven**: one feature row per impression `(entity, event_ts,
-  values)`, computed over the **full** log once. This reproduces the current
-  `merge_asof`/rolling output exactly and makes the migration *verifiable* — and it removes
-  the per-split `history=` recompute (point-in-time join slices by `entity_df` instead).
+  values)`, computed over the **standard train window (4/08–4/21)** in one pass. This
+  reproduces the current `merge_asof`/rolling output exactly and makes the migration
+  *verifiable* — and it removes the per-split `history=` recompute (point-in-time join slices
+  by `entity_df` instead).
+- **The offline store is never queried past 4/21** — val is a *slice of the training parquet*
+  (4/20–4/21), not a separate retrieval, and the **eval arms (4/22–5/08) are served from the
+  online store** via the streaming replay below. So `build_base_frame(split)` takes one split:
+  `build_sources.py` builds the train source, `stream_replay.py` folds a test arm's raw events.
 - **Leakage handling, two-step**:
   - **Selm A first (done)** — store `f_pre` (window `[T−7D, T)`, current-row excluded, i.e.
     today's `closed="left"`) with join `feature_ts <= entity_ts`, asserted equal to the old
@@ -208,9 +213,12 @@ serving, **not** stored. So the online store's job is exactly the 11 features.
   (batch, staler) **vs** the streaming replay below (event-driven, fresher). The streaming
   path recomputes the **same 7-day window definition** from raw events, so its served value
   reproduces the exact offline point-in-time value — **train/serve consistency by
-  construction**, not a different online formula. The only residual gap is the
-  **freshness-expiry lag** (the window shrinks with wall-clock time, but a pull-based online
-  value only refreshes when a key sees a new event) — a measurable Stage-5 number.
+  construction**, not a different online formula. It is still *two* implementations, so the
+  equivalence is pinned by an oracle test (`test_streaming.py`: `WindowAvg` ==
+  `_set_rolling_columns` value-for-value) — **the parity gate that matters now**, and it needs
+  no source rows past the train window. The only residual gap is the **freshness-expiry lag**
+  (the window shrinks with wall-clock time, but a pull-based online value only refreshes when a
+  key sees a new event) — a measurable Stage-5 number.
 
 ### Streaming replay (design)
 
@@ -222,9 +230,10 @@ but serve a different distribution → deliberate train/serve skew. Kept only as
 Stage-5 skew *demo*, tuned by a `half_life`, not the serving path.)
 
 - **What it replays**: the **standard test arm** (4/22–5/08) in **event-time** order, as the
-  time-continuation of the train+val standard stream. train+val is the **warm-up** that seeds
-  per-key state — state can't be reconstructed from materialized rates, the window's
-  `(count, Σsignal)` must be rebuilt by folding history. **Late data** is injected to exercise
+  time-continuation of the stream before it. The **warm-up** that seeds per-key state is the
+  whole train window (4/08–4/21, i.e. the entire `log_standard_4_08_to_4_21` file) — state
+  can't be reconstructed from materialized rates, the window's `(count, Σsignal)` must be
+  rebuilt by folding history. **Late data** is injected to exercise
   event-time vs processing-time: Feast's Redis online store keeps the value with the **max
   `event_ts`**, so out-of-order writes don't clobber a fresher value (verified experimentally).
 - **How the online feature is computed**: an incremental sliding-window aggregate per key —
@@ -261,14 +270,14 @@ Stage-5 skew *demo*, tuned by a `half_life`, not the serving path.)
 
 ```
 OFFLINE (training)
-  full log ─► features/compute.py ─► data/feature_sources/*.parquet ─► Feast FeatureViews
+  train log (4/08–4/21) ─► features/compute.py ─► data/feature_sources/*.parquet ─► Feast FVs
                                           │ get_historical_features
                                           ▼
                               build_training_set.py → training parquet → KuaiPureDataset
 
 ONLINE (serving, Redis) — two population paths feed the same online store:
   (batch)        data/feature_sources/*.parquet ─► materialize ──────────────┐
-  (event-driven) raw test log ─► WindowAgg ─► KeyedStateStore ─► write_to_online_store (push)
+  (event-driven) raw test log (4/22–5/08) ─► WindowAgg ─► KeyedStateStore ─► write_to_online_store
                                                                               ▼
                             serving/predictor.py: get_online_features → model → scores
 ```
@@ -276,13 +285,17 @@ ONLINE (serving, Redis) — two population paths feed the same online store:
 - [v] **Phase 0** — Stage-1 rolling/cumulative logic extracted into `features/compute.py`,
   emitting the three tidy sources.
 - [v] **Phase 1** — Feast repo (entities, FeatureViews, FileSource) + **offline parity gate**
-  (Selm A, green on train+val); `KuaiPureDataset.from_parquet` reads the Feast-built parquet.
+  (Selm A, green on the train window); `KuaiPureDataset.from_parquet` reads the Feast-built
+  parquet. That gate was a one-off *migration* check and now only keeps `KuaiPureData`'s
+  rolling code alive as its oracle — retire it (and `build_splits`) when Phase 3 closes.
 - [v] **Phase 2** — `feast materialize` → online store on **Redis** (switched from the sqlite
   stand-in) + `serving/predictor.py` online path (`get_online_features` → model). The call is
   identical on either backend — Feast abstracts the online store away.
 - [ ] **Phase 3** — streaming replay (above): `WindowAgg` + `KeyedStateStore` (dict → tiles →
-  RocksDB), warm-up on train+val, event-time replay of the standard test arm, late-data
-  injection. Then text features (Stage 3) as a *new* FeatureView.
+  RocksDB), warm-up on the train window (4/08–4/21), event-time replay of the standard test
+  arm, late-data injection. ⚠️ the two eval arms **overlap in time**, so each replays from its
+  own freshly warmed state — one shared aggregator would leak the standard arm's events into
+  the random arm. Then text features (Stage 3) as a *new* FeatureView.
 
 **Practices:** Feast `Entity`/`FeatureView`/`FileSource`, `get_historical_features` vs
 `get_online_features`, `materialize`, Redis online store, point-in-time correctness · streaming
