@@ -15,10 +15,10 @@ from kuai_recommender.features.schema import (
 )
 
 
-def build_base_frame() -> pd.DataFrame:
-    df_train = pd.read_csv(DATA_DIR / KuaiPureDatasetSplits.TRAIN)
-    df_val = pd.read_csv(DATA_DIR / KuaiPureDatasetSplits.VAL)
-    df = pd.concat([df_train, df_val], ignore_index=True)
+def build_base_frame(
+    split: KuaiPureDatasetSplits = KuaiPureDatasetSplits.TRAIN,
+) -> pd.DataFrame:
+    df = pd.read_csv(DATA_DIR / split)
     df["dt"] = pd.to_datetime(df["time_ms"], unit="ms", utc=True).dt.tz_convert(
         "Asia/Shanghai"
     )

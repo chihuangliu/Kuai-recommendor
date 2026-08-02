@@ -205,38 +205,89 @@ serving, **not** stored. So the online store's job is exactly the 11 features.
     the online value becomes fresher. ⚠️ needs a stable tiebreak for equal-timestamp events
     (e.g. one `video_id` shown to many users in the same ms).
 - **Online population = where "interval" belongs**: periodic `materialize_incremental`
-  (batch, staler) **vs** the streaming replay below (per-event, fresher). The gap between
-  either and the exact offline value is **train/serve skew** — a measurable Stage-5 number.
+  (batch, staler) **vs** the streaming replay below (event-driven, fresher). The streaming
+  path recomputes the **same 7-day window definition** from raw events, so its served value
+  reproduces the exact offline point-in-time value — **train/serve consistency by
+  construction**, not a different online formula. The only residual gap is the
+  **freshness-expiry lag** (the window shrinks with wall-clock time, but a pull-based online
+  value only refreshes when a key sees a new event) — a measurable Stage-5 number.
 
-### Streaming replay
+### Streaming replay (design)
 
-Event-replay script feeds impressions in **event-time** order and updates the **online store**
-incrementally (with injected **late data**), as an alternative to periodic materialize. No
-Kafka broker — the point is event-time vs processing-time and freshness, not infra.
+Goal: **serve the same feature definition the model trained on** — the 7-day rolling window —
+computed online *incrementally from raw events*. This is the feature store's core payoff: one
+definition, both paths, **skew-free serving by construction**. (An EWMA / approximate online
+value was considered and **rejected as the serving path**: it would train on the rolling window
+but serve a different distribution → deliberate train/serve skew. Kept only as a possible
+Stage-5 skew *demo*, tuned by a `half_life`, not the serving path.)
+
+- **What it replays**: the **standard test arm** (4/22–5/08) in **event-time** order, as the
+  time-continuation of the train+val standard stream. train+val is the **warm-up** that seeds
+  per-key state — state can't be reconstructed from materialized rates, the window's
+  `(count, Σsignal)` must be rebuilt by folding history. **Late data** is injected to exercise
+  event-time vs processing-time: Feast's Redis online store keeps the value with the **max
+  `event_ts`**, so out-of-order writes don't clobber a fresher value (verified experimentally).
+- **How the online feature is computed**: an incremental sliding-window aggregate per key —
+  running `(count, Σsignal)` with a deque (later: tiles) for eviction. **Read-before-update**
+  yields `closed="left"` (excludes the current row, leak-free), matching `compute.py` exactly.
+  ⚠️ equal-timestamp events must be read *before* any of them append (tie handling), or the
+  video FV won't match — same tiebreak concern as Selm B above. The online store (Redis) holds
+  **only the served values**; Feast is **push-fed** via `write_to_online_store` (Feast does not
+  compute windows itself).
+- **Why not replay the precomputed source parquet**: that equals `materialize` (same numbers,
+  different transport). Streaming's value is computing the aggregate **from raw events**, so it
+  can be fresher than a periodic batch *and* reproduce the point-in-time value exactly.
+
+**Three roles — one script now, separate services in production:**
+
+| Role | Job | Production | Here |
+|---|---|---|---|
+| Stream compute | fold events → window aggregate | Flink / Spark Structured Streaming / Kafka Streams | `WindowAgg` |
+| State backend | keyed state (deque / tiles) | RocksDB (+ checkpoints) | `KeyedStateStore`: dict → RocksDB |
+| Online store | serve computed values | Redis / DynamoDB, Feast-push-fed | Redis |
+
+- **Abstraction (Repository pattern)**: the aggregation depends only on a `KeyedStateStore`
+  (`get` / `put` / `items`), so the backend swaps without touching the fold — `DictStateStore`
+  now, `RocksDBStateStore` later. The catch that *shapes the design*: an external backend
+  serializes state per event, so storing a raw deque is O(window) I/O per event → the portable
+  form is **tile partial-sums** (fixed small state per key). Tiles also **bound memory** and
+  make the window **queryable at any time**, which removes the freshness-expiry lag above. So
+  tiles are not just an optimization — they are the prerequisite for an external state backend.
+- No Kafka broker — the point is event-time, state, and freshness, not infra. Feature platforms
+  that do windowed aggregation natively, for reference: **Chronon**, **Tecton**,
+  **Materialize / RisingWave**.
 
 ### Integration plan (built in parallel — old inline path kept as control until parity passes)
 
 ```
-full log ─► features/compute.py (existing rolling logic, re-shaped to tidy source)
-                 └─► data/feature_sources/*.parquet ─► Feast FeatureViews
-                          offline ↓                         ↓ online (Redis)
-                    get_historical_features         materialize / streaming replay
-                          ↓                                  ↓
-                 build_training_set.py               serving/predictor.py
-                    → training parquet               get_online_features → model → scores
-                          ↓
-                  KuaiPureDataset (unchanged)
+OFFLINE (training)
+  full log ─► features/compute.py ─► data/feature_sources/*.parquet ─► Feast FeatureViews
+                                          │ get_historical_features
+                                          ▼
+                              build_training_set.py → training parquet → KuaiPureDataset
+
+ONLINE (serving, Redis) — two population paths feed the same online store:
+  (batch)        data/feature_sources/*.parquet ─► materialize ──────────────┐
+  (event-driven) raw test log ─► WindowAgg ─► KeyedStateStore ─► write_to_online_store (push)
+                                                                              ▼
+                            serving/predictor.py: get_online_features → model → scores
 ```
 
 - [v] **Phase 0** — Stage-1 rolling/cumulative logic extracted into `features/compute.py`,
   emitting the three tidy sources.
 - [v] **Phase 1** — Feast repo (entities, FeatureViews, FileSource) + **offline parity gate**
   (Selm A, green on train+val); `KuaiPureDataset.from_parquet` reads the Feast-built parquet.
-- [ ] **Phase 2** — `feast materialize` → online store (Redis) + `serving/predictor.py` online path.
-- [ ] **Phase 3** — streaming replay; text features (Stage 3) as a *new* FeatureView.
+- [v] **Phase 2** — `feast materialize` → online store on **Redis** (switched from the sqlite
+  stand-in) + `serving/predictor.py` online path (`get_online_features` → model). The call is
+  identical on either backend — Feast abstracts the online store away.
+- [ ] **Phase 3** — streaming replay (above): `WindowAgg` + `KeyedStateStore` (dict → tiles →
+  RocksDB), warm-up on train+val, event-time replay of the standard test arm, late-data
+  injection. Then text features (Stage 3) as a *new* FeatureView.
 
 **Practices:** Feast `Entity`/`FeatureView`/`FileSource`, `get_historical_features` vs
-`get_online_features`, `materialize`, Redis online store, point-in-time correctness
+`get_online_features`, `materialize`, Redis online store, point-in-time correctness · streaming
+state: incremental sliding-window aggregation, tile partial-sums, `KeyedStateStore` (Repository
+pattern), RocksDB-backed keyed state
 
 ---
 
