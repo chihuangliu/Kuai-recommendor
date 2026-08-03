@@ -31,7 +31,7 @@ from kuai_recommender.features.schema import (
     VIDEO_FEATURES_FLOAT,
     VIDEO_FEATURES_INT,
 )
-from kuai_recommender.features.scripts import stream_replay
+from kuai_recommender.scripts import stream_replay
 from kuai_recommender.features.streaming import WindowFeatureAgg
 
 TZ = "Asia/Shanghai"

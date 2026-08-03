@@ -36,7 +36,7 @@ from kuai_recommender.features.schema import (
     VIDEO_FEATURES_FLOAT,
     VIDEO_FEATURES_INT,
 )
-from kuai_recommender.features.scripts import stream_replay
+from kuai_recommender.scripts import stream_replay
 from kuai_recommender.features.streaming import ServedFeatures, WindowFeatureAgg
 
 TZ = "Asia/Shanghai"
@@ -112,10 +112,34 @@ def _replay_frame() -> pd.DataFrame:
     row. Hour 01: (u2,a20,v2) plus a second author for u1."""
     return _frame(
         [
-            {"user_id": 1, "author_id": 10, "video_id": 1, "dt": "2022-04-22 00:00", "is_click": 1},
-            {"user_id": 1, "author_id": 10, "video_id": 1, "dt": "2022-04-22 00:30", "is_click": 0},
-            {"user_id": 2, "author_id": 20, "video_id": 2, "dt": "2022-04-22 01:00", "is_click": 1},
-            {"user_id": 1, "author_id": 30, "video_id": 3, "dt": "2022-04-22 01:30", "is_click": 1},
+            {
+                "user_id": 1,
+                "author_id": 10,
+                "video_id": 1,
+                "dt": "2022-04-22 00:00",
+                "is_click": 1,
+            },
+            {
+                "user_id": 1,
+                "author_id": 10,
+                "video_id": 1,
+                "dt": "2022-04-22 00:30",
+                "is_click": 0,
+            },
+            {
+                "user_id": 2,
+                "author_id": 20,
+                "video_id": 2,
+                "dt": "2022-04-22 01:00",
+                "is_click": 1,
+            },
+            {
+                "user_id": 1,
+                "author_id": 30,
+                "video_id": 3,
+                "dt": "2022-04-22 01:30",
+                "is_click": 1,
+            },
         ]
     )
 
@@ -126,10 +150,42 @@ def _eval_frame() -> pd.DataFrame:
     the mask path."""
     return _frame(
         [
-            {"user_id": 1, "author_id": 10, "video_id": 1, "dt": "2022-04-22 00:00", "is_click": 1, "duration_ms": 10000, "play_time_ms": 9000},
-            {"user_id": 2, "author_id": 20, "video_id": 2, "dt": "2022-04-22 00:30", "is_click": 0, "duration_ms": 8000, "play_time_ms": 1000},
-            {"user_id": 1, "author_id": 10, "video_id": 1, "dt": "2022-04-22 01:00", "is_click": 1, "duration_ms": 5000, "play_time_ms": 6000},
-            {"user_id": 3, "author_id": 30, "video_id": 3, "dt": "2022-04-22 01:30", "is_click": 0, "duration_ms": 0, "play_time_ms": 0},
+            {
+                "user_id": 1,
+                "author_id": 10,
+                "video_id": 1,
+                "dt": "2022-04-22 00:00",
+                "is_click": 1,
+                "duration_ms": 10000,
+                "play_time_ms": 9000,
+            },
+            {
+                "user_id": 2,
+                "author_id": 20,
+                "video_id": 2,
+                "dt": "2022-04-22 00:30",
+                "is_click": 0,
+                "duration_ms": 8000,
+                "play_time_ms": 1000,
+            },
+            {
+                "user_id": 1,
+                "author_id": 10,
+                "video_id": 1,
+                "dt": "2022-04-22 01:00",
+                "is_click": 1,
+                "duration_ms": 5000,
+                "play_time_ms": 6000,
+            },
+            {
+                "user_id": 3,
+                "author_id": 30,
+                "video_id": 3,
+                "dt": "2022-04-22 01:30",
+                "is_click": 0,
+                "duration_ms": 0,
+                "play_time_ms": 0,
+            },
         ]
     )
 
@@ -140,10 +196,42 @@ def _eval_frame() -> pd.DataFrame:
 def test_prepare_frame_filters_half_open_window_and_adds_targets(monkeypatch):
     frame = _frame(
         [
-            {"user_id": 1, "author_id": 10, "video_id": 1, "dt": "2022-04-21 12:00", "is_click": 1, "duration_ms": 10000, "play_time_ms": 9000},
-            {"user_id": 1, "author_id": 10, "video_id": 1, "dt": "2022-04-22 00:00", "is_click": 1, "duration_ms": 10000, "play_time_ms": 9000},
-            {"user_id": 2, "author_id": 20, "video_id": 2, "dt": "2022-04-23 12:00", "is_click": 0, "duration_ms": 8000, "play_time_ms": 1000},
-            {"user_id": 3, "author_id": 30, "video_id": 3, "dt": "2022-04-24 00:00", "is_click": 1, "duration_ms": 5000, "play_time_ms": 6000},
+            {
+                "user_id": 1,
+                "author_id": 10,
+                "video_id": 1,
+                "dt": "2022-04-21 12:00",
+                "is_click": 1,
+                "duration_ms": 10000,
+                "play_time_ms": 9000,
+            },
+            {
+                "user_id": 1,
+                "author_id": 10,
+                "video_id": 1,
+                "dt": "2022-04-22 00:00",
+                "is_click": 1,
+                "duration_ms": 10000,
+                "play_time_ms": 9000,
+            },
+            {
+                "user_id": 2,
+                "author_id": 20,
+                "video_id": 2,
+                "dt": "2022-04-23 12:00",
+                "is_click": 0,
+                "duration_ms": 8000,
+                "play_time_ms": 1000,
+            },
+            {
+                "user_id": 3,
+                "author_id": 30,
+                "video_id": 3,
+                "dt": "2022-04-24 00:00",
+                "is_click": 1,
+                "duration_ms": 5000,
+                "play_time_ms": 6000,
+            },
         ]
     )
     monkeypatch.setattr(stream_replay, "build_base_frame", lambda split=None: frame)
@@ -218,7 +306,11 @@ def test_online_store_sink_pushes_correct_schemas():
 
     stream_replay.replay(agg, df, [stream_replay.OnlineStoreSink(fake)])
 
-    assert set(fake.pushed) == {"user_features", "user_author_features", "video_features"}
+    assert set(fake.pushed) == {
+        "user_features",
+        "user_author_features",
+        "video_features",
+    }
 
     def cols(name: str) -> set:
         return set().union(*(d.columns for d in fake.pushed[name]))
@@ -237,13 +329,23 @@ def test_online_store_sink_pushes_correct_schemas():
     assert batch0["dt"].iloc[0] == pd.Timestamp("2022-04-22 00:30", tz=TZ)
 
     # user_author_features: (user, author) keyed, never null
-    assert cols("user_author_features") == {"user_id", "author_id", "dt", *USER_AUTHOR_FEATURES}
+    assert cols("user_author_features") == {
+        "user_id",
+        "author_id",
+        "dt",
+        *USER_AUTHOR_FEATURES,
+    }
     ua = combined("user_author_features")
     assert ua["author_id"].notna().all()
     assert set(ua["author_id"]) == {10, 20, 30}
 
     # video_features: floats + int cumulative counter
-    assert cols("video_features") == {"video_id", "dt", *VIDEO_FEATURES_FLOAT, *VIDEO_FEATURES_INT}
+    assert cols("video_features") == {
+        "video_id",
+        "dt",
+        *VIDEO_FEATURES_FLOAT,
+        *VIDEO_FEATURES_INT,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -259,7 +361,9 @@ def test_served_features_source_selects_continuous_features_in_order():
     user_author = np.arange(100, 100 + len(USER_AUTHOR_FEATURES), dtype=np.float32)
     video = np.arange(200, 200 + len(VIDEO_FEATURES_FLOAT), dtype=np.float32)
     video_cum = np.arange(300, 300 + len(VIDEO_FEATURES_INT), dtype=np.int32)
-    served = ServedFeatures(user=user, user_author=user_author, video=video, video_cum=video_cum)
+    served = ServedFeatures(
+        user=user, user_author=user_author, video=video, video_cum=video_cum
+    )
 
     named = {
         **dict(zip(USER_FEATURES, user)),
@@ -341,7 +445,11 @@ def test_replay_runs_write_and_eval_in_one_pass(monkeypatch, tmp_path):
     assert counter["n"] == n_events  # once per event, regardless of sink count
 
     # sink A wrote all three views ...
-    assert set(fake.pushed) == {"user_features", "user_author_features", "video_features"}
+    assert set(fake.pushed) == {
+        "user_features",
+        "user_author_features",
+        "video_features",
+    }
     # ... and sink B scored + dumped, from the same pass
     assert calls and all(c["from_online"] is False for c in calls)
     assert (expected_dir / "metrics.json").exists()
