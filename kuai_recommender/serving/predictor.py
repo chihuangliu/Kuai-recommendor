@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 
 from kuai_recommender.data.data_pure import KuaiPureData
@@ -18,6 +19,8 @@ def predict(
     user_ids: list[str],
     author_ids: list[str],
     video_ids: list[str],
+    features: np.ndarray | None = None,
+    from_online: bool = True,
 ) -> dict[str, torch.Tensor]:
     user_id_buckets = torch.tensor(
         [hash_to_bucket(user_id, get_bucket_size()["user_id"]) for user_id in user_ids],
@@ -32,23 +35,28 @@ def predict(
     )
 
     x_cat = torch.stack([user_id_buckets, author_id_buckets], dim=1)
-    all_features = store.get_online_features(
-        features=[f"user_features:{f}" for f in USER_FEATURES]
-        + [f"user_author_features:{f}" for f in USER_AUTHOR_FEATURES]
-        + [f"video_features:{f}" for f in VIDEO_FEATURES],
-        entity_rows=[
-            {"user_id": int(u), "author_id": int(a), "video_id": int(v)}
-            for u, a, v in zip(user_ids, author_ids, video_ids)
-        ],
-    ).to_dict()
+    if from_online:
+        all_features = store.get_online_features(
+            features=[f"user_features:{f}" for f in USER_FEATURES]
+            + [f"user_author_features:{f}" for f in USER_AUTHOR_FEATURES]
+            + [f"video_features:{f}" for f in VIDEO_FEATURES],
+            entity_rows=[
+                {"user_id": int(u), "author_id": int(a), "video_id": int(v)}
+                for u, a, v in zip(user_ids, author_ids, video_ids)
+            ],
+        ).to_dict()
 
-    all_feature_values = []
-    for feat in KuaiPureData.CONTINUOUS_FEATURES:
-        values: list = [
-            v if v is not None else float("nan") for v in all_features[feat]
-        ]
-        all_feature_values.append(torch.tensor(values, dtype=torch.float32))
-    x = torch.stack(all_feature_values, dim=1).nan_to_num(nan=0.0)
+        all_feature_values = []
+        for feat in KuaiPureData.CONTINUOUS_FEATURES:
+            values: list = [
+                v if v is not None else float("nan") for v in all_features[feat]
+            ]
+            all_feature_values.append(torch.tensor(values, dtype=torch.float32))
+        x = torch.stack(all_feature_values, dim=1).nan_to_num(nan=0.0)
+    else:
+        assert features is not None, "Features must be provided if from_online is False"
+        x = torch.tensor(features, dtype=torch.float32).nan_to_num(nan=0.0)
+
     model.eval()
     with torch.no_grad():
         return model.forward(x, x_cat)
