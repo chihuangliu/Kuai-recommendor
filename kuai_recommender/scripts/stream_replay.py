@@ -23,17 +23,17 @@ from kuai_recommender.train.train_helper import (
 )
 from kuai_recommender.utils.model_dims import get_model_dims
 
-from ...data.utils import KuaiPureDatasetSplits
-from ..compute import build_base_frame, set_engagement_targets
-from ..feature_repo.store import store
-from ..schema import (
+from ..data.utils import KuaiPureDatasetSplits
+from ..features.compute import build_base_frame, set_engagement_targets
+from ..features.feature_repo.store import store
+from ..features.schema import (
     BINARY_FEATURES,
     USER_AUTHOR_FEATURES,
     USER_FEATURES,
     VIDEO_FEATURES_FLOAT,
     VIDEO_FEATURES_INT,
 )
-from ..streaming import ServedFeatures, WindowFeatureAgg
+from ..features.streaming import ServedFeatures, WindowFeatureAgg
 
 
 def warmup() -> WindowFeatureAgg:
