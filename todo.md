@@ -1,5 +1,17 @@
 # TODO
 
+## Streaming — optional production-grade swaps (Phase 3 follow-ups)
+
+- [ ] **Replace the in-memory `DictStateStore` with a RocksDB-backed
+      `KeyedStateStore`.** Store tile partial-sums (the portable, fixed-size-per-key
+      state form — see README "Repository pattern"), not raw deques, so per-event I/O
+      stays O(1). Bounds memory and survives restart via checkpoints.
+- [ ] **Replace the in-process `WindowAgg` stream compute with a real stream
+      processor** (Flink / Spark Structured Streaming / Kafka Streams) fed by a Kafka
+      broker, instead of the current event-replay script. The `KeyedStateStore`
+      abstraction and the oracle parity test (`test_streaming.py`) should carry over
+      unchanged.
+
 ## Code review follow-ups (deferred, low severity)
 
 - [ ] **`KuaiPureDataset` uses mutable class lists as default args**
