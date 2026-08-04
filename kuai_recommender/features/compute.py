@@ -7,11 +7,13 @@ from kuai_recommender.data.utils import (
     KuaiPureDatasetSplits,
     attach_author_id,
 )
-from kuai_recommender.features.schema import (
-    BINARY_FEATURES,
-    USER_AUTHOR_FEATURES,
-    USER_FEATURES,
-    VIDEO_FEATURES,
+from kuai_recommender.features.registry import (
+    BINARY_SIGNALS,
+    UA,
+    USER,
+    VIDEO,
+    Kind,
+    get_cols,
 )
 
 
@@ -27,20 +29,22 @@ def build_base_frame(
 
 def build_user_source(base_frame: pd.DataFrame) -> pd.DataFrame:
     df = _set_rolling_columns(base_frame, "user_id")
-    cols = ["dt", "user_id"] + USER_FEATURES
+    cols = ["dt", "user_id"] + [c.name for c in get_cols(USER, Kind.ROLLING)]
     return df[cols]
 
 
 def build_user_author_source(base_frame: pd.DataFrame) -> pd.DataFrame:
     df = _set_rolling_columns(base_frame, ["user_id", "author_id"])
-    cols = ["dt", "user_id", "author_id"] + USER_AUTHOR_FEATURES
+    cols = ["dt", "user_id", "author_id"] + [c.name for c in get_cols(UA, Kind.ROLLING)]
     return df[cols]
 
 
 def build_video_source(base_frame: pd.DataFrame) -> pd.DataFrame:
     df = _set_rolling_columns(base_frame, "video_id")
     df = _set_cumulative_columns(df, "video_id", ["is_click"])
-    cols = ["dt", "video_id"] + VIDEO_FEATURES
+    cols = ["dt", "video_id"] + [
+        c.name for c in get_cols(VIDEO, Kind.ROLLING) + get_cols(VIDEO, Kind.CUMULATIVE)
+    ]
     return df[cols]
 
 
@@ -66,7 +70,7 @@ def _set_rolling_columns(
     grouped = df.groupby(group_by, dropna=False)
 
     suffix = "_".join(group_by if isinstance(group_by, list) else [group_by])
-    for col in BINARY_FEATURES:
+    for col in BINARY_SIGNALS:
         df[f"{col}_rolling_{suffix}"] = (
             grouped.rolling(window=window, closed="left", on="dt")[col].mean().values
         )

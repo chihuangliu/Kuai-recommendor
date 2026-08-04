@@ -26,18 +26,27 @@ import pandas as pd
 import torch
 
 import kuai_recommender
-from kuai_recommender.data.data_pure import KuaiPureData
 from kuai_recommender.data.utils import KuaiPureDatasetSplits
 from kuai_recommender.features.compute import set_engagement_targets
-from kuai_recommender.features.schema import (
-    BINARY_FEATURES,
-    USER_AUTHOR_FEATURES,
-    USER_FEATURES,
-    VIDEO_FEATURES_FLOAT,
-    VIDEO_FEATURES_INT,
+from kuai_recommender.features.registry import (
+    UA,
+    USER,
+    VIDEO,
+    BINARY_SIGNALS,
+    BINARY_TARGETS,
+    CONTINUOUS_TARGETS,
+    MODEL_CONTINUOUS,
+    Kind,
+    get_cols,
 )
 from kuai_recommender.scripts import stream_replay
 from kuai_recommender.features.streaming import ServedFeatures, WindowFeatureAgg
+
+# The per-view slices these sinks zip positionally against the served arrays.
+USER_FEATURES = [c.name for c in get_cols(USER, Kind.ROLLING)]
+USER_AUTHOR_FEATURES = [c.name for c in get_cols(UA, Kind.ROLLING)]
+VIDEO_FEATURES_FLOAT = [c.name for c in get_cols(VIDEO, Kind.ROLLING)]
+VIDEO_FEATURES_INT = [c.name for c in get_cols(VIDEO, Kind.CUMULATIVE)]
 
 TZ = "Asia/Shanghai"
 SPLIT = KuaiPureDatasetSplits.TEST_STANDARD
@@ -48,10 +57,10 @@ SPLIT = KuaiPureDatasetSplits.TEST_STANDARD
 # --------------------------------------------------------------------------- #
 def _frame(rows: list[dict]) -> pd.DataFrame:
     """build_base_frame() stand-in: raw log columns, dt tz-aware, author_id int64,
-    every BINARY_FEATURES column present (0 by default)."""
+    every BINARY_SIGNALS column present (0 by default)."""
     df = pd.DataFrame(rows)
     df["dt"] = pd.to_datetime(df["dt"]).dt.tz_localize(TZ)
-    for col in BINARY_FEATURES:
+    for col in BINARY_SIGNALS:
         if col not in df.columns:
             df[col] = 0
     assert df["author_id"].dtype == "int64"  # the attach_author_id postcondition
@@ -100,8 +109,8 @@ def _fake_predict_recording(calls: list):
         calls.append({"from_online": from_online, "n": len(user_ids)})
         n = len(user_ids)
         return {
-            "binary": torch.zeros((n, len(KuaiPureData.BINARY_TARGETS))),
-            "continuous": torch.zeros((n, len(KuaiPureData.CONTINUOUS_TARGETS))),
+            "binary": torch.zeros((n, len(BINARY_TARGETS))),
+            "continuous": torch.zeros((n, len(CONTINUOUS_TARGETS))),
         }
 
     return fake_predict
@@ -372,11 +381,11 @@ def test_served_features_source_selects_continuous_features_in_order():
         **dict(zip(VIDEO_FEATURES_INT, video_cum)),
     }
     expected = np.array(
-        [named[f] for f in KuaiPureData.CONTINUOUS_FEATURES], dtype=np.float32
+        [named[f] for f in MODEL_CONTINUOUS], dtype=np.float32
     )
 
     x = source.get_features(event=None, served=served)
-    assert x.shape == (len(KuaiPureData.CONTINUOUS_FEATURES),)
+    assert x.shape == (len(MODEL_CONTINUOUS),)
     assert np.array_equal(x, expected)
 
 
@@ -405,8 +414,8 @@ def test_eval_sink_scores_and_dumps_metrics(monkeypatch, tmp_path):
 
     metrics = json.loads((expected_dir / "metrics.json").read_text())
     assert set(metrics) == {"binary", "continuous"}
-    assert set(metrics["binary"]) == set(KuaiPureData.BINARY_TARGETS)
-    assert set(metrics["continuous"]) == set(KuaiPureData.CONTINUOUS_TARGETS)
+    assert set(metrics["binary"]) == set(BINARY_TARGETS)
+    assert set(metrics["continuous"]) == set(CONTINUOUS_TARGETS)
 
 
 # --------------------------------------------------------------------------- #

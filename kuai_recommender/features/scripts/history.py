@@ -6,13 +6,13 @@ from ..common import TRAINING_DIR, get_training_file_path
 from ..compute import set_engagement_targets, set_hash_bucket
 from ..entity_df import build_impression_frame
 from ..feature_repo.store import store
-from ..schema import USER_AUTHOR_FEATURES, USER_FEATURES, VIDEO_FEATURES
+from ..registry import BUCKET_COLS, UA, USER, VIDEO, get_cols
 
 
 def build_history_frame(impression_df: pd.DataFrame) -> pd.DataFrame:
     df = set_engagement_targets(impression_df)
-    df = set_hash_bucket(df, "user_id", get_bucket_size()["user_id"])
-    df = set_hash_bucket(df, "author_id", get_bucket_size()["author_id"])
+    for col in BUCKET_COLS:
+        df = set_hash_bucket(df, col.source, get_bucket_size()[col.source])
     return df
 
 
@@ -24,17 +24,17 @@ def get_features(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     user_feats = store.get_historical_features(
         entity_df=impressions[["user_id", "event_timestamp"]].drop_duplicates(),
-        features=[f"user_features:{f}" for f in USER_FEATURES],
+        features=[f"{USER.name}:{c.name}" for c in get_cols(USER)],
     ).to_df()
     video_feats = store.get_historical_features(
         entity_df=impressions[["video_id", "event_timestamp"]].drop_duplicates(),
-        features=[f"video_features:{f}" for f in VIDEO_FEATURES],
+        features=[f"{VIDEO.name}:{c.name}" for c in get_cols(VIDEO)],
     ).to_df()
     ua_feats = store.get_historical_features(
         entity_df=impressions[
             ["user_id", "author_id", "event_timestamp"]
         ].drop_duplicates(),
-        features=[f"user_author_features:{f}" for f in USER_AUTHOR_FEATURES],
+        features=[f"{UA.name}:{c.name}" for c in get_cols(UA)],
     ).to_df()
     return user_feats, video_feats, ua_feats
 

@@ -10,17 +10,16 @@ from kuai_recommender.config import (
     BATCH_SIZE,
     EPOCH,
     LEARNING_RATE,
-    MULTI_TASK_MODEL_HIDDEN_DIM,
     NEG_KEEP_FRAC,
     POS_WEIGHT,
 )
 from kuai_recommender.data.data_pure import (
-    KuaiPureData,
     KuaiPureDataset,
     collate_with_masks,
 )
 from kuai_recommender.data.utils import KuaiPureDatasetSplits
 from kuai_recommender.features.common import get_training_file_path
+from kuai_recommender.features.registry import BINARY_TARGETS, CONTINUOUS_TARGETS
 from kuai_recommender.nn.multitask import MultiTaskModel
 from kuai_recommender.train.train_helper import (
     BinaryScores,
@@ -76,9 +75,7 @@ def main():
     # train
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
     schedular = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCH)
-    pos_weights = torch.full(
-        (len(KuaiPureData.BINARY_TARGETS),), POS_WEIGHT, device=device
-    )
+    pos_weights = torch.full((len(BINARY_TARGETS),), POS_WEIGHT, device=device)
 
     # setup run id
     run_id = get_run_id()
@@ -86,8 +83,8 @@ def main():
     best_val_loss = float("inf")
     for epoch in range(EPOCH):
         total_train_loss = 0.0
-        binary_scores = BinaryScores(KuaiPureData.BINARY_TARGETS)
-        continuous_scores = ContinuousScores(KuaiPureData.CONTINUOUS_TARGETS)
+        binary_scores = BinaryScores(BINARY_TARGETS)
+        continuous_scores = ContinuousScores(CONTINUOUS_TARGETS)
         model.train()
         for (
             x_batch,

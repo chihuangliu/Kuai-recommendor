@@ -29,7 +29,7 @@ from kuai_recommender.features.compute import (
     _set_cumulative_columns,
     _set_rolling_columns,
 )
-from kuai_recommender.features.schema import BINARY_FEATURES
+from kuai_recommender.features.registry import BINARY_SIGNALS
 from kuai_recommender.features.streaming import (
     DictStateStore,
     RunningCountAgg,
@@ -185,8 +185,8 @@ def test_matches_offline_rolling_value_for_value():
     shuffled so both paths' own sorts -- not input order -- decide the result."""
     rng = np.random.default_rng(0)
     n = 48
-    signals = rng.integers(0, 2, size=(n, len(BINARY_FEATURES)))
-    df = pd.DataFrame(signals, columns=BINARY_FEATURES)
+    signals = rng.integers(0, 2, size=(n, len(BINARY_SIGNALS)))
+    df = pd.DataFrame(signals, columns=BINARY_SIGNALS)
     df["user_id"] = rng.integers(1, 5, size=n)  # 4 users
     # strictly increasing, distinct timestamps spanning 10 days (240h / 5h step)
     df["dt"] = [BASE + pd.Timedelta(hours=int(h)) for h in np.arange(n) * 5]
@@ -194,13 +194,13 @@ def test_matches_offline_rolling_value_for_value():
 
     # offline truth: same code the training pipeline ships
     offline = _set_rolling_columns(df.copy(), "user_id")
-    rolling_cols = [f"{f}_rolling_user_id" for f in BINARY_FEATURES]
+    rolling_cols = [f"{f}_rolling_user_id" for f in BINARY_SIGNALS]
 
     # online: fold events in event-time (dt) order, keyed per user
     agg = _agg()
     online: dict = {}
     for idx, row in df.sort_values("dt").iterrows():
-        signal = row[BINARY_FEATURES].to_numpy(dtype=float)
+        signal = row[BINARY_SIGNALS].to_numpy(dtype=float)
         online[idx] = agg.step(row["user_id"], row["dt"], signal)
 
     for idx in df.index:

@@ -1,13 +1,15 @@
 """Contract for KuaiPureDataset.from_parquet -- the constructor that feeds the
-Dataset from a Feast-built training parquet instead of an inline KuaiPureData.
+Dataset from a Feast-built training parquet.
 
 Feature *values* are already covered by the parity gate (the parquet is the Feast
-retrieval output, asserted == KuaiPureData). What from_parquet adds, and what this
-locks, is the wiring:
+retrieval output). What from_parquet adds, and what this locks, is the wiring:
 
   * it returns a usable KuaiPureDataset (regression: an early version set the
     attributes on ``obj.df`` and forgot ``return obj`` -> returned None / raised),
-  * features / cat_features / labels default to the KuaiPureData column contract,
+  * features / cat_features / labels default to the registry column contract --
+    and default to the RIGHT ones (regression: continuous_features and
+    categorical_features were once defaulted to each other's list, sending float
+    rates into the int embedding lookup),
   * __getitem__ still zeroes feature NaNs but passes label NaNs through untouched
     (the mask, not a fake 0, is what a missing label must become), and
   * negative sampling drops pure-negative rows.
@@ -19,12 +21,19 @@ import numpy as np
 import pandas as pd
 import torch
 
-from kuai_recommender.data.data_pure import KuaiPureData, KuaiPureDataset
+from kuai_recommender.data.data_pure import KuaiPureDataset
+from kuai_recommender.features.registry import (
+    BINARY_SIGNALS,
+    BINARY_TARGETS,
+    CONTINUOUS_TARGETS,
+    MODEL_CATEGORICAL,
+    MODEL_CONTINUOUS,
+)
 
-_FEATURES = KuaiPureData.CONTINUOUS_FEATURES
-_CATS = KuaiPureData.CATEGORICAL_FEATURES
-_BINARIES = KuaiPureData.BINARY_COLUMNS_ORIGINAL  # neg-sampling + first 8 labels
-_LABELS = KuaiPureData.BINARY_TARGETS + KuaiPureData.CONTINUOUS_TARGETS
+_FEATURES = MODEL_CONTINUOUS
+_CATS = MODEL_CATEGORICAL
+_BINARIES = BINARY_SIGNALS  # neg-sampling + first 8 labels
+_LABELS = BINARY_TARGETS + CONTINUOUS_TARGETS
 
 
 def _write_parquet(path, *, feature_nan_row0: bool = False) -> pd.DataFrame:
@@ -90,5 +99,5 @@ def test_from_parquet_negative_sampling_drops_pure_negatives(tmp_path):
     dropped = KuaiPureDataset.from_parquet(path, neg_keep_frac=0.0)
 
     assert len(dropped) < len(kept_all)
-    survivors = dropped.df[KuaiPureData.BINARY_COLUMNS_ORIGINAL].sum(axis=1)
+    survivors = dropped.df[_BINARIES].sum(axis=1)
     assert (survivors > 0).all(), "a pure-negative row survived neg_keep_frac=0"

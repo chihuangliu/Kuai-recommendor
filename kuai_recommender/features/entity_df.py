@@ -6,7 +6,7 @@ from kuai_recommender.data.utils import (
     attach_author_id,
 )
 
-from .schema import BINARY_FEATURES, ENGAGEMENT_INPUT_COLUMNS
+from .registry import BINARY_SIGNALS, ENGAGEMENT_INPUT_COLUMNS
 
 
 def build_impression_frame(split: KuaiPureDatasetSplits) -> pd.DataFrame:
@@ -18,7 +18,7 @@ def build_impression_frame(split: KuaiPureDatasetSplits) -> pd.DataFrame:
             "video_id",
             "time_ms",
             *ENGAGEMENT_INPUT_COLUMNS,
-            *BINARY_FEATURES,
+            *BINARY_SIGNALS,
         ],
     )
     df = attach_author_id(df)

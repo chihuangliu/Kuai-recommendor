@@ -1,16 +1,22 @@
-"""Unit tests for KuaiPureData._set_rolling_columns.
+"""Unit tests for KuaiPureDataset and the shared feature-compute helpers.
 
-These exercise the point-in-time rolling-rate logic in isolation: we bypass
-__init__ (which reads the real CSVs) and inject a tiny hand-built frame so the
-expected rolling means can be computed by hand. The properties under test are
-the ones that silently broke during development:
+Scope -- the model-facing data layer that survives the registry refactor:
+  * KuaiPureDataset.__getitem__ / _neg_sampling (NaN imputation, target
+    pass-through, pure-negative downsampling),
+  * collate_with_masks (column order, NaN masking),
+  * compute.set_engagement_targets (skip / dwell_log derivation),
+  * compute hash-bucket helpers (categorical id features).
 
-  * strictly-before-T semantics (closed="left") -> first event of a group is NaN,
-    a row never sees its own label (no leakage),
-  * correct *time* window (``"7D"``), so events older than the window are excluded,
-  * correct row alignment after the internal sort (the values land on the right
-    rows, not shuffled), and per-group isolation,
-  * distinct, collision-free column names per group_by.
+What is NOT here: the point-in-time rolling / cumulative *maths*. Those used to
+be tested against KuaiPureData._set_rolling_columns / _set_cumulative_columns --
+a dead duplicate of features/compute.py that nothing instantiated, now deleted.
+The live path is compute.py, covered by tests/features/test_compute.py (builders)
+and the value-for-value oracle in tests/features/test_streaming.py (7-day
+eviction, empty-window NaN, cumulative count).
+
+The frozen feature-column *contract* (which columns feed the model, in what
+order) is pinned in tests/features/test_feature_contract.py. The column constants
+now come from features.registry.
 """
 
 import math
@@ -20,370 +26,29 @@ import pandas as pd
 import pytest
 import torch
 
-from kuai_recommender.data.data_pure import (
-    KuaiPureData,
-    KuaiPureDataset,
-    collate_with_masks,
-)
+from kuai_recommender.data.data_pure import KuaiPureDataset, collate_with_masks
 from kuai_recommender.data.utils import next_pow2
 from kuai_recommender.features.compute import (
     hash_to_bucket,
     set_engagement_targets,
     set_hash_bucket,
 )
-
-TZ = "Asia/Shanghai"
-
-
-def _make(rows: list[dict]) -> KuaiPureData:
-    """Build a KuaiPureData with a synthetic df, skipping __init__/CSV reads.
-
-    Each row dict must carry ``rid`` (unique row id used for lookup), the group
-    keys it needs (``user_id``/``author_id``/``video_id``), ``dt`` (a date str),
-    and optionally ``is_click``. Every other binary column is filled with 0 so
-    the method's loop over BINARY_COLUMNS has real columns to read.
-    """
-    df = pd.DataFrame(rows)
-    df["dt"] = pd.to_datetime(df["dt"]).dt.tz_localize(TZ)
-    for col in KuaiPureData.BINARY_COLUMNS_ORIGINAL:
-        if col not in df.columns:
-            df[col] = 0
-    # Deliberately shuffle so we prove the method's own sort/alignment, not the
-    # input order, is what makes the result correct.
-    df = df.sample(frac=1, random_state=0).reset_index(drop=True)
-
-    obj = KuaiPureData.__new__(KuaiPureData)
-    obj.df = df
-    return obj
-
-
-def _rates(obj: KuaiPureData, column: str) -> dict:
-    """Map rid -> value for a produced rolling column."""
-    return obj.df.set_index("rid")[column].to_dict()
-
-
-def _assert_rate(actual: dict, expected: dict) -> None:
-    assert actual.keys() == expected.keys()
-    for rid, exp in expected.items():
-        got = actual[rid]
-        if exp is None:
-            assert got is None or (isinstance(got, float) and math.isnan(got)), (
-                f"rid={rid}: expected NaN, got {got!r}"
-            )
-        else:
-            assert got == pytest.approx(exp), f"rid={rid}: expected {exp}, got {got!r}"
-
-
-def test_first_event_is_nan_and_no_self_leakage():
-    """The first impression of a group has no prior -> NaN; a row never sees itself."""
-    obj = _make(
-        [
-            {"rid": 1, "user_id": 1, "dt": "2022-04-08", "is_click": 1},
-            {"rid": 2, "user_id": 1, "dt": "2022-04-09", "is_click": 0},
-        ]
-    )
-    obj._set_user_rolling()
-    rates = _rates(obj, "is_click_rolling_user_id")
-    # rid1 has no prior -> NaN. rid2 sees only rid1 (=1), not its own 0.
-    _assert_rate(rates, {1: None, 2: 1.0})
-
-
-def test_rolling_mean_values_and_row_alignment():
-    """Exact rolling means, with users interleaved, land on the correct rows."""
-    obj = _make(
-        [
-            {"rid": 1, "user_id": 1, "dt": "2022-04-08", "is_click": 1},
-            {"rid": 2, "user_id": 2, "dt": "2022-04-08", "is_click": 0},
-            {"rid": 3, "user_id": 1, "dt": "2022-04-09", "is_click": 0},
-            {"rid": 4, "user_id": 1, "dt": "2022-04-10", "is_click": 1},
-            {"rid": 5, "user_id": 2, "dt": "2022-04-10", "is_click": 1},
-        ]
-    )
-    obj._set_user_rolling()
-    rates = _rates(obj, "is_click_rolling_user_id")
-    _assert_rate(
-        rates,
-        {
-            1: None,  # u1 first event
-            3: 1.0,  # u1 prior = [1]
-            4: 0.5,  # u1 prior = [1, 0]
-            2: None,  # u2 first event
-            5: 0.0,  # u2 prior = [0] -- unaffected by u1's clicks
-        },
-    )
-
-
-def test_window_excludes_events_older_than_7d():
-    """A 7-day window drops events that fall outside it (true time window, not row count)."""
-    obj = _make(
-        [
-            {"rid": 1, "user_id": 1, "dt": "2022-04-08", "is_click": 1},
-            {"rid": 2, "user_id": 1, "dt": "2022-04-13", "is_click": 0},  # 5d later
-            {
-                "rid": 3,
-                "user_id": 1,
-                "dt": "2022-04-18",
-                "is_click": 1,
-            },  # 10d after rid1
-        ]
-    )
-    obj._set_user_rolling()
-    rates = _rates(obj, "is_click_rolling_user_id")
-    _assert_rate(
-        rates,
-        {
-            1: None,  # no prior
-            2: 1.0,  # prior within 7d = [rid1] = [1]
-            3: 0.0,  # prior within 7d = [rid2] = [0]; rid1 is >7d old -> excluded
-        },
-    )
-
-
-def test_user_author_grouping_is_per_pair():
-    """user-author affinity aggregates per (user_id, author_id), not per user."""
-    obj = _make(
-        [
-            {
-                "rid": 1,
-                "user_id": 1,
-                "author_id": 10,
-                "dt": "2022-04-08",
-                "is_click": 1,
-            },
-            {
-                "rid": 2,
-                "user_id": 1,
-                "author_id": 10,
-                "dt": "2022-04-09",
-                "is_click": 1,
-            },
-            {
-                "rid": 3,
-                "user_id": 1,
-                "author_id": 20,
-                "dt": "2022-04-09",
-                "is_click": 0,
-            },
-            {
-                "rid": 4,
-                "user_id": 1,
-                "author_id": 10,
-                "dt": "2022-04-10",
-                "is_click": 0,
-            },
-        ]
-    )
-    obj._set_user_author_rolling()
-    rates = _rates(obj, "is_click_rolling_user_id_author_id")
-    _assert_rate(
-        rates,
-        {
-            1: None,  # (1,10) first
-            2: 1.0,  # (1,10) prior = [1]
-            4: 1.0,  # (1,10) prior = [1, 1]; the (1,20) row does not leak in
-            3: None,  # (1,20) first
-        },
-    )
-
-
-def test_column_names_are_distinct_per_group_by():
-    """Each group_by writes its own suffix, so successive calls don't collide."""
-    obj = _make(
-        [
-            {
-                "rid": 1,
-                "user_id": 1,
-                "author_id": 10,
-                "video_id": 100,
-                "dt": "2022-04-08",
-                "is_click": 1,
-            },
-            {
-                "rid": 2,
-                "user_id": 1,
-                "author_id": 10,
-                "video_id": 100,
-                "dt": "2022-04-09",
-                "is_click": 0,
-            },
-        ]
-    )
-    obj._set_user_rolling()
-    obj._set_user_author_rolling()
-    obj._set_video_rolling()
-
-    for suffix in ("user_id", "user_id_author_id", "video_id"):
-        assert f"is_click_rolling_{suffix}" in obj.df.columns
-    # All three suffixes coexist -> no overwrite.
-    assert obj.df["is_click_rolling_user_id"].notna().any()
-    assert obj.df["is_click_rolling_video_id"].notna().any()
-
-
-def test_all_binary_columns_get_a_rolling_feature():
-    """The method produces one rolling column per binary label."""
-    obj = _make(
-        [
-            {"rid": 1, "user_id": 1, "dt": "2022-04-08"},
-            {"rid": 2, "user_id": 1, "dt": "2022-04-09"},
-        ]
-    )
-    obj._set_user_rolling()
-    for col in KuaiPureData.BINARY_COLUMNS_ORIGINAL:
-        assert f"{col}_rolling_user_id" in obj.df.columns
-
-
-def test_rates_are_bounded_in_unit_interval():
-    """Rolling means of 0/1 labels stay within [0, 1] (ignoring NaN)."""
-    obj = _make(
-        [
-            {
-                "rid": i,
-                "user_id": i % 3,
-                "dt": f"2022-04-{8 + (i % 10):02d}",
-                "is_click": i % 2,
-            }
-            for i in range(1, 31)
-        ]
-    )
-    obj._set_user_rolling()
-    vals = obj.df["is_click_rolling_user_id"].dropna()
-    assert ((vals >= 0) & (vals <= 1)).all()
-
-
-# --- _set_cumulative_columns -------------------------------------------------
-# Cumulative features are *counts* of prior positives (all history < T), so the
-# expected values are integers and the first event of a group is 0 (not NaN).
-
-
-def _counts(obj: KuaiPureData, column: str) -> dict:
-    """Map rid -> value for a produced cumulative column."""
-    return obj.df.set_index("rid")[column].to_dict()
-
-
-def test_cumulative_is_strictly_before_t_no_leakage():
-    """Cumulative count excludes the current row: first event is 0, self never counted."""
-    obj = _make(
-        [
-            {"rid": 1, "video_id": 9, "dt": "2022-04-08", "is_click": 1},
-            {"rid": 2, "video_id": 9, "dt": "2022-04-09", "is_click": 1},
-            {"rid": 3, "video_id": 9, "dt": "2022-04-10", "is_click": 0},
-        ]
-    )
-    obj._set_video_cumulative()
-    counts = _counts(obj, "is_click_cumulative_video_id")
-    # rid1: no prior -> 0. rid2: prior [1] -> 1. rid3: prior [1,1] -> 2 (its own 0 excluded).
-    assert counts == {1: 0, 2: 1, 3: 2}
-
-
-def test_cumulative_alignment_and_per_group():
-    """Counts land on the right rows (videos interleaved) and don't leak across groups."""
-    obj = _make(
-        [
-            {"rid": 1, "video_id": 9, "dt": "2022-04-08", "is_click": 1},
-            {"rid": 2, "video_id": 8, "dt": "2022-04-08", "is_click": 1},
-            {"rid": 3, "video_id": 9, "dt": "2022-04-09", "is_click": 0},
-            {"rid": 4, "video_id": 9, "dt": "2022-04-10", "is_click": 1},
-            {"rid": 5, "video_id": 8, "dt": "2022-04-09", "is_click": 1},
-        ]
-    )
-    obj._set_video_cumulative()
-    counts = _counts(obj, "is_click_cumulative_video_id")
-    assert counts == {
-        1: 0,  # v9 first
-        3: 1,  # v9 prior [1]
-        4: 1,  # v9 prior [1, 0] -> 1 (video 8's clicks don't leak in)
-        2: 0,  # v8 first
-        5: 1,  # v8 prior [1]
-    }
-
-
-def test_cumulative_is_never_nan_and_monotonic_per_group():
-    """Every row gets a finite count (unlike rolling), non-decreasing within a group."""
-    obj = _make(
-        [
-            {
-                "rid": i,
-                "video_id": i % 2,
-                "dt": f"2022-04-{8 + (i % 10):02d}",
-                "is_click": i % 2,
-            }
-            for i in range(1, 21)
-        ]
-    )
-    obj._set_video_cumulative()
-    col = obj.df["is_click_cumulative_video_id"]
-    assert col.notna().all()
-    ordered = obj.df.sort_values(["video_id", "dt"])
-    diffs = ordered.groupby("video_id")["is_click_cumulative_video_id"].diff().dropna()
-    assert (diffs >= 0).all()  # counts only accumulate
-
-
-def test_cumulative_creates_a_column_per_binary_label():
-    obj = _make(
-        [
-            {"rid": 1, "video_id": 9, "dt": "2022-04-08"},
-            {"rid": 2, "video_id": 9, "dt": "2022-04-09"},
-        ]
-    )
-    obj._set_video_cumulative()
-    for col in KuaiPureData.BINARY_COLUMNS_ORIGINAL:
-        assert f"{col}_cumulative_video_id" in obj.df.columns
-
-
-# --- _set_rolling_columns with NaN group keys (dropna=False fix) --------------
-# A video absent from the basic feature file left-joins to a NaN author_id.
-# groupby(dropna=False) must keep those rows so the .values assign stays aligned.
-
-
-def test_rolling_survives_nan_group_key():
-    """NaN author_id rows are kept (own group), not dropped -> no length mismatch."""
-    obj = _make(
-        [
-            {
-                "rid": 1,
-                "user_id": 1,
-                "author_id": 10,
-                "dt": "2022-04-08",
-                "is_click": 1,
-            },
-            {
-                "rid": 2,
-                "user_id": 1,
-                "author_id": 10,
-                "dt": "2022-04-09",
-                "is_click": 0,
-            },
-            {
-                "rid": 3,
-                "user_id": 1,
-                "author_id": float("nan"),
-                "dt": "2022-04-08",
-                "is_click": 1,
-            },
-            {
-                "rid": 4,
-                "user_id": 1,
-                "author_id": float("nan"),
-                "dt": "2022-04-09",
-                "is_click": 1,
-            },
-        ]
-    )
-    obj._set_user_author_rolling()  # would ValueError on length mismatch if NaN rows were dropped
-    rates = _rates(obj, "is_click_rolling_user_id_author_id")
-    # Every input row still gets a value, and NaN-author rows form their own group.
-    assert set(rates.keys()) == {1, 2, 3, 4}
-    _assert_rate(rates, {1: None, 2: 1.0, 3: None, 4: 1.0})
+from kuai_recommender.features.registry import (
+    BINARY_TARGETS,
+    CONTINUOUS_TARGETS,
+    MODEL_CATEGORICAL,
+    MODEL_CONTINUOUS,
+)
 
 
 # --- KuaiPureDataset ----------------------------------------------------------
-# The Dataset wraps a prepared KuaiPureData.df and must hand the model finite
-# float tensors: rolling features are NaN for a group's first impression, and
-# that NaN must not reach training.
+# The Dataset wraps a prepared df and must hand the model finite float tensors:
+# rolling features are NaN for a group's first impression, and that NaN must not
+# reach training.
 
 
-_ALL_LABELS = KuaiPureData.BINARY_TARGETS + KuaiPureData.CONTINUOUS_TARGETS
-_ALL_CAT = KuaiPureData.CATEGORICAL_FEATURES
+_ALL_LABELS = BINARY_TARGETS + CONTINUOUS_TARGETS
+_ALL_CAT = MODEL_CATEGORICAL
 
 
 def _fill_missing(df: pd.DataFrame) -> pd.DataFrame:
@@ -399,11 +64,19 @@ def _fill_missing(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _make_dataset(rows: list[dict], features: list[str]) -> KuaiPureDataset:
-    """Wrap a hand-built df in a KuaiPureDataset, bypassing KuaiPureData.__init__."""
+    """Wrap a hand-built df in a KuaiPureDataset."""
     df = _fill_missing(pd.DataFrame(rows))
-    data = KuaiPureData.__new__(KuaiPureData)
-    data.df = df
-    return KuaiPureDataset(data, features)
+    return KuaiPureDataset(df, features)
+
+
+def test_dataset_defaults_wire_continuous_and_categorical_correctly():
+    """Guard the constructor defaults: continuous_features must default to the 11
+    rolling/cumulative MODEL_CONTINUOUS, categorical to the 2 id buckets. A swap
+    sends float rates into the int embedding lookup (truncated to 0) and the
+    bucket ids into the float input -- silent, and invisible to the contract test."""
+    ds = KuaiPureDataset(_fill_missing(pd.DataFrame([{"rate": 0.5}])))
+    assert ds.features == MODEL_CONTINUOUS
+    assert ds.cat_features == MODEL_CATEGORICAL
 
 
 def test_getitem_returns_feature_tensor_and_label_dict():
@@ -455,18 +128,16 @@ def test_nan_targets_pass_through_untouched():
 # --- KuaiPureDataset negative sampling ---------------------------------------
 # _neg_sampling downsamples only "pure negative" impressions (no engagement
 # signal at all), to shrink the training set without starving the sparse
-# positive heads. The mask is over BINARY_COLUMNS_ORIGINAL only: is_skip (a
-# negative signal that fires on ~70% of rows) and dwell_log (continuous) must
-# NOT count as positives, or the boring rows we mean to drop get protected.
+# positive heads. The mask is over BINARY_SIGNALS only: is_skip (a negative
+# signal that fires on ~70% of rows) and dwell_log (continuous) must NOT count as
+# positives, or the boring rows we mean to drop get protected.
 
 
 def _dataset_with_sampling(
     rows: list[dict], features: list[str], neg_keep_frac: float
 ) -> KuaiPureDataset:
     df = _fill_missing(pd.DataFrame(rows))
-    data = KuaiPureData.__new__(KuaiPureData)
-    data.df = df
-    return KuaiPureDataset(data, features, neg_keep_frac=neg_keep_frac)
+    return KuaiPureDataset(df, features, neg_keep_frac=neg_keep_frac)
 
 
 def _pure_neg_row(rate: float = 0.5) -> dict:
@@ -498,7 +169,7 @@ def test_skipped_no_engagement_rows_are_downsampled():
 
 
 def test_any_engagement_signal_protects_a_row():
-    """Every column in BINARY_COLUMNS_ORIGINAL counts -- not just is_click.
+    """Every column in BINARY_SIGNALS counts -- not just is_click.
     A lone long_view or a lone (sparse) is_hate positive must survive."""
     rows = [_pure_neg_row() for _ in range(6)] + [
         {"rate": 0.5, "long_view": 1},
@@ -545,16 +216,13 @@ def test_neg_sampling_is_reproducible_under_a_reseeded_rng(monkeypatch):
 # (we abstain rather than fabricate a label from raw watch time).
 
 
-def _make_targets(rows: list[dict]) -> KuaiPureData:
-    """Build a KuaiPureData carrying only duration_ms/play_time_ms, then derive targets."""
-    df = pd.DataFrame(rows)
-    obj = KuaiPureData.__new__(KuaiPureData)
-    obj.df = set_engagement_targets(df)
-    return obj
+def _make_targets(rows: list[dict]) -> pd.DataFrame:
+    """Derive engagement targets on a hand-built duration/play frame."""
+    return set_engagement_targets(pd.DataFrame(rows))
 
 
-def _col(obj: KuaiPureData, column: str) -> dict:
-    return obj.df.set_index("rid")[column].to_dict()
+def _col(df: pd.DataFrame, column: str) -> dict:
+    return df.set_index("rid")[column].to_dict()
 
 
 def _isnan(x) -> bool:
@@ -563,7 +231,7 @@ def _isnan(x) -> bool:
 
 def test_skip_needs_both_low_completion_and_low_time():
     """AND semantics: skip only when the user watched a small *fraction* AND little absolute time."""
-    obj = _make_targets(
+    df = _make_targets(
         [
             # low completion (0.1) + low time (1s)  -> skip
             {"rid": 1, "duration_ms": 10_000, "play_time_ms": 1_000},
@@ -575,12 +243,12 @@ def test_skip_needs_both_low_completion_and_low_time():
             {"rid": 4, "duration_ms": 20_000, "play_time_ms": 18_000},
         ]
     )
-    assert _col(obj, "is_skip") == {1: 1.0, 2: 0.0, 3: 0.0, 4: 0.0}
+    assert _col(df, "is_skip") == {1: 1.0, 2: 0.0, 3: 0.0, 4: 0.0}
 
 
 def test_skip_thresholds_are_strict():
     """completion == 0.5 and play == 5000 sit on the 'not skip' side (strict `<`)."""
-    obj = _make_targets(
+    df = _make_targets(
         [
             # completion exactly 0.5 -> not < 0.5 -> not skip
             {"rid": 1, "duration_ms": 10_000, "play_time_ms": 5_000},
@@ -590,18 +258,18 @@ def test_skip_thresholds_are_strict():
             {"rid": 3, "duration_ms": 12_500, "play_time_ms": 4_999},
         ]
     )
-    assert _col(obj, "is_skip") == {1: 0.0, 2: 0.0, 3: 1.0}
+    assert _col(df, "is_skip") == {1: 0.0, 2: 0.0, 3: 1.0}
 
 
 def test_completion_clipped_so_loops_are_not_skips():
     """A replayed short clip (play > duration) has completion clipped to 1.0 -> never a skip."""
-    obj = _make_targets([{"rid": 1, "duration_ms": 2_000, "play_time_ms": 10_000}])
-    assert _col(obj, "is_skip")[1] == 0.0
+    df = _make_targets([{"rid": 1, "duration_ms": 2_000, "play_time_ms": 10_000}])
+    assert _col(df, "is_skip")[1] == 0.0
 
 
 def test_dwell_log_is_log1p_of_watch_time():
     """Normal watch (play <= 2*duration): dwell_log = log1p(play_time_ms)."""
-    obj = _make_targets(
+    df = _make_targets(
         [
             {"rid": 1, "duration_ms": 10_000, "play_time_ms": 1_000},
             {"rid": 2, "duration_ms": 200_000, "play_time_ms": 40_000},
@@ -612,7 +280,7 @@ def test_dwell_log_is_log1p_of_watch_time():
             },  # instant skip -> log1p(0)=0
         ]
     )
-    dwell = _col(obj, "dwell_log")
+    dwell = _col(df, "dwell_log")
     assert dwell[1] == pytest.approx(math.log1p(1_000), rel=1e-5)
     assert dwell[2] == pytest.approx(math.log1p(40_000), rel=1e-5)
     assert dwell[3] == pytest.approx(0.0, abs=1e-6)
@@ -620,22 +288,22 @@ def test_dwell_log_is_log1p_of_watch_time():
 
 def test_dwell_caps_loop_replays_at_two_durations():
     """play_time far above the video length is capped at 2*duration before log1p."""
-    obj = _make_targets([{"rid": 1, "duration_ms": 2_000, "play_time_ms": 10_000}])
+    df = _make_targets([{"rid": 1, "duration_ms": 2_000, "play_time_ms": 10_000}])
     # min(10_000, 2*2_000) = 4_000
-    assert _col(obj, "dwell_log")[1] == pytest.approx(math.log1p(4_000), rel=1e-5)
+    assert _col(df, "dwell_log")[1] == pytest.approx(math.log1p(4_000), rel=1e-5)
 
 
 def test_invalid_duration_abstains_on_both_targets():
     """duration_ms <= 0 -> denominator unknown -> is_skip and dwell_log are NaN, not fabricated."""
-    obj = _make_targets(
+    df = _make_targets(
         [
             {"rid": 1, "duration_ms": 0, "play_time_ms": 1_000},
             {"rid": 2, "duration_ms": -5, "play_time_ms": 0},
             {"rid": 3, "duration_ms": 10_000, "play_time_ms": 1_000},  # valid control
         ]
     )
-    skip = _col(obj, "is_skip")
-    dwell = _col(obj, "dwell_log")
+    skip = _col(df, "is_skip")
+    dwell = _col(df, "dwell_log")
     assert _isnan(skip[1]) and _isnan(dwell[1])
     assert _isnan(skip[2]) and _isnan(dwell[2])
     # the valid row is unaffected and still labelled
@@ -649,8 +317,8 @@ def test_invalid_duration_abstains_on_both_targets():
 # mask per target group. The mask is the whole point: is_skip/dwell_log are NaN
 # when duration<=0, and a NaN target must be *masked*, not silently zeroed.
 
-_BIN_COLS = KuaiPureData.BINARY_TARGETS
-_CONT_COLS = KuaiPureData.CONTINUOUS_TARGETS
+_BIN_COLS = BINARY_TARGETS
+_CONT_COLS = CONTINUOUS_TARGETS
 
 
 def _sample(
@@ -738,11 +406,11 @@ def test_collate_does_not_zero_the_masked_target():
 # --- categorical (hash-bucket) features ---------------------------------------
 # user_id / author_id are folded into a fixed number of hash buckets so the model
 # can embed high-cardinality ids. __getitem__ emits them as a long tensor and
-# collate stacks them to [B, C]; column order == CATEGORICAL_FEATURES.
+# collate stacks them to [B, C]; column order == MODEL_CATEGORICAL.
 
 
 def test_getitem_returns_categorical_bucket_tensor():
-    """x_cat carries the bucket ids as int64, in CATEGORICAL_FEATURES order."""
+    """x_cat carries the bucket ids as int64, in MODEL_CATEGORICAL order."""
     ds = _make_dataset(
         [{"rate": 0.25, "is_click": 1, "user_id_bucket": 3, "author_id_bucket": 7}],
         features=["rate"],
@@ -810,35 +478,32 @@ def test_hash_to_bucket_normalises_numpy_and_python_ints():
     assert hash_to_bucket(np.int64(777), 64) == hash_to_bucket(777, 64)
 
 
-def _bucket_obj(values: list, column: str = "user_id") -> KuaiPureData:
-    obj = KuaiPureData.__new__(KuaiPureData)
-    obj.df = pd.DataFrame({column: values})
-    return obj
+def _bucket_frame(values: list, column: str = "user_id") -> pd.DataFrame:
+    return pd.DataFrame({column: values})
 
 
 def test_set_hash_bucket_handles_int64_column():
     """Regression: an int64 id column buckets without error and stays in range."""
-    obj = _bucket_obj([1, 2, 3, 4, 5])
-    set_hash_bucket(obj.df, "user_id", 16)
-    buckets = obj.df["user_id_bucket"]
-    assert buckets.between(1, 15).all()
+    df = _bucket_frame([1, 2, 3, 4, 5])
+    set_hash_bucket(df, "user_id", 16)
+    assert df["user_id_bucket"].between(1, 15).all()
 
 
 def test_set_hash_bucket_maps_nan_to_zero():
     """Regression: an author_id NaN (video missing from the basic feature file) buckets
     to the reserved 0, while real authors get a non-zero bucket."""
-    obj = _bucket_obj([10.0, float("nan"), 20.0], column="author_id")
-    set_hash_bucket(obj.df, "author_id", 16)
-    buckets = obj.df["author_id_bucket"].tolist()
+    df = _bucket_frame([10.0, float("nan"), 20.0], column="author_id")
+    set_hash_bucket(df, "author_id", 16)
+    buckets = df["author_id_bucket"].tolist()
     assert buckets[1] == 0
     assert buckets[0] != 0 and buckets[2] != 0
 
 
 def test_set_hash_bucket_is_stable_per_id():
     """Repeated ids in a column all resolve to the same bucket."""
-    obj = _bucket_obj([42, 7, 42, 7, 42])
-    set_hash_bucket(obj.df, "user_id", 32)
-    b = obj.df["user_id_bucket"].tolist()
+    df = _bucket_frame([42, 7, 42, 7, 42])
+    set_hash_bucket(df, "user_id", 32)
+    b = df["user_id_bucket"].tolist()
     assert b[0] == b[2] == b[4]  # every 42
     assert b[1] == b[3]  # every 7
 
@@ -846,11 +511,10 @@ def test_set_hash_bucket_is_stable_per_id():
 def test_set_user_and_author_buckets_write_categorical_columns():
     """set_hash_bucket on user_id / author_id populates exactly the columns
     __getitem__ reads as categorical features."""
-    obj = KuaiPureData.__new__(KuaiPureData)
-    obj.df = pd.DataFrame({"user_id": [1, 2], "author_id": [10.0, float("nan")]})
-    set_hash_bucket(obj.df, "user_id", 16)
-    set_hash_bucket(obj.df, "author_id", 16)
+    df = pd.DataFrame({"user_id": [1, 2], "author_id": [10.0, float("nan")]})
+    set_hash_bucket(df, "user_id", 16)
+    set_hash_bucket(df, "author_id", 16)
     for col in _ALL_CAT:
-        assert col in obj.df.columns
+        assert col in df.columns
     # NaN author still resolves to the reserved bucket, not a crash.
-    assert obj.df["author_id_bucket"].tolist()[1] == 0
+    assert df["author_id_bucket"].tolist()[1] == 0

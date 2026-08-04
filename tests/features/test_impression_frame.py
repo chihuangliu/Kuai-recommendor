@@ -25,7 +25,7 @@ from kuai_recommender.data.utils import (
     KuaiPureDatasetSplits,
 )
 from kuai_recommender.features.entity_df import build_impression_frame
-from kuai_recommender.features.schema import BINARY_FEATURES, ENGAGEMENT_INPUT_COLUMNS
+from kuai_recommender.features.registry import BINARY_SIGNALS, ENGAGEMENT_INPUT_COLUMNS
 
 _SPLIT = KuaiPureDatasetSplits.TEST_STANDARD
 
@@ -39,7 +39,7 @@ EXPECTED_COLUMNS = {
     "video_id",
     "time_ms",
     *ENGAGEMENT_INPUT_COLUMNS,
-    *BINARY_FEATURES,
+    *BINARY_SIGNALS,
     "author_id",  # merged from video_features_basic
     "event_timestamp",  # derived from time_ms
 }

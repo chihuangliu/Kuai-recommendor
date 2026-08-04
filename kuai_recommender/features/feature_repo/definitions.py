@@ -4,12 +4,14 @@ from feast import Entity, FeatureView, Field, FileSource
 from feast.types import Float64, Int32, ValueType
 
 from kuai_recommender.features.common import FEATURE_SOURCES_DIR
-from kuai_recommender.features.schema import (
-    USER_AUTHOR_FEATURES,
-    USER_FEATURES,
-    VIDEO_FEATURES_FLOAT,
-    VIDEO_FEATURES_INT,
-)
+from kuai_recommender.features.registry import UA, USER, VIDEO, DType, View, get_cols
+
+_FEAST_DTYPE = {DType.FLOAT: Float64, DType.INT: Int32}
+
+
+def _schema(view: View) -> list[Field]:
+    return [Field(name=c.name, dtype=_FEAST_DTYPE[c.dtype]) for c in get_cols(view)]
+
 
 user = Entity(name="user", join_keys=["user_id"], value_type=ValueType.INT64)
 author = Entity(name="author", join_keys=["author_id"], value_type=ValueType.INT64)
@@ -21,7 +23,7 @@ user_features = FeatureView(
     source=FileSource(
         path=str(FEATURE_SOURCES_DIR / "user.parquet"), timestamp_field="dt"
     ),
-    schema=[Field(name=f, dtype=Float64) for f in USER_FEATURES],
+    schema=_schema(USER),
     online=True,
     ttl=timedelta(days=365),
 )
@@ -32,7 +34,7 @@ user_author_features = FeatureView(
     source=FileSource(
         path=str(FEATURE_SOURCES_DIR / "user_author.parquet"), timestamp_field="dt"
     ),
-    schema=[Field(name=f, dtype=Float64) for f in USER_AUTHOR_FEATURES],
+    schema=_schema(UA),
     online=True,
     ttl=timedelta(days=365),
 )
@@ -43,8 +45,7 @@ video_features = FeatureView(
     source=FileSource(
         path=str(FEATURE_SOURCES_DIR / "video.parquet"), timestamp_field="dt"
     ),
-    schema=[Field(name=f, dtype=Float64) for f in VIDEO_FEATURES_FLOAT]
-    + [Field(name=f, dtype=Int32) for f in VIDEO_FEATURES_INT],
+    schema=_schema(VIDEO),
     online=True,
     ttl=timedelta(days=365),
 )

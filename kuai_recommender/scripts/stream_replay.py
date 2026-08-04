@@ -12,7 +12,6 @@ from feast import FeatureStore
 from tqdm import tqdm
 
 import kuai_recommender
-from kuai_recommender.data.data_pure import KuaiPureData
 from kuai_recommender.nn.multitask import MultiTaskModel
 from kuai_recommender.serving.predictor import predict
 from kuai_recommender.train.train_helper import (
@@ -26,14 +25,23 @@ from kuai_recommender.utils.model_dims import get_model_dims
 from ..data.utils import KuaiPureDatasetSplits
 from ..features.compute import build_base_frame, set_engagement_targets
 from ..features.feature_repo.store import store
-from ..features.schema import (
-    BINARY_FEATURES,
-    USER_AUTHOR_FEATURES,
-    USER_FEATURES,
-    VIDEO_FEATURES_FLOAT,
-    VIDEO_FEATURES_INT,
+from ..features.registry import (
+    BINARY_SIGNALS,
+    BINARY_TARGETS,
+    CONTINUOUS_TARGETS,
+    MODEL_CONTINUOUS,
+    UA,
+    USER,
+    VIDEO,
+    Kind,
+    get_cols,
 )
 from ..features.streaming import ServedFeatures, WindowFeatureAgg
+
+USER_WINDOW_COLS = [c.name for c in get_cols(USER, Kind.ROLLING)]
+USER_AUTHOR_WINDOW_COLS = [c.name for c in get_cols(UA, Kind.ROLLING)]
+VIDEO_WINDOW_COLS = [c.name for c in get_cols(VIDEO, Kind.ROLLING)]
+VIDEO_CUM_COLS = [c.name for c in get_cols(VIDEO, Kind.CUMULATIVE)]
 
 
 def warmup() -> WindowFeatureAgg:
@@ -43,7 +51,7 @@ def warmup() -> WindowFeatureAgg:
     video_ids = base_df["video_id"].to_numpy(dtype=np.int64)
     is_clicks = base_df["is_click"].to_numpy(dtype=np.int64)
     dts = list(base_df["dt"])
-    signals = base_df[BINARY_FEATURES].to_numpy(dtype=np.float32)
+    signals = base_df[BINARY_SIGNALS].to_numpy(dtype=np.float32)
     wf_agg = WindowFeatureAgg(pd.Timedelta("7D"))
 
     for i in range(len(base_df)):
@@ -115,14 +123,14 @@ class ServedFeaturesSource(FeatureSource):
 
     def get_features(self, event: NamedTuple, served: ServedFeatures) -> np.ndarray:
         named_served = {
-            **dict(zip(USER_FEATURES, served.user)),
-            **dict(zip(USER_AUTHOR_FEATURES, served.user_author)),
-            **dict(zip(VIDEO_FEATURES_FLOAT, served.video)),
-            **dict(zip(VIDEO_FEATURES_INT, served.video_cum)),
+            **dict(zip(USER_WINDOW_COLS, served.user)),
+            **dict(zip(USER_AUTHOR_WINDOW_COLS, served.user_author)),
+            **dict(zip(VIDEO_WINDOW_COLS, served.video)),
+            **dict(zip(VIDEO_CUM_COLS, served.video_cum)),
         }
 
         return np.array(
-            [named_served[f] for f in KuaiPureData.CONTINUOUS_FEATURES],
+            [named_served[f] for f in MODEL_CONTINUOUS],
             dtype=np.float32,
         )
 
@@ -170,7 +178,7 @@ class OnlineStoreSink(ReplaySink):
                     {
                         "user_id": user_id,
                         "dt": dt,
-                        **_feat2dict(features, USER_FEATURES),
+                        **_feat2dict(features, USER_WINDOW_COLS),
                     }
                     for user_id, (dt, features) in self.latest["user"].items()
                 ]
@@ -184,7 +192,7 @@ class OnlineStoreSink(ReplaySink):
                         "user_id": user_id,
                         "author_id": author_id,
                         "dt": dt,
-                        **_feat2dict(features, USER_AUTHOR_FEATURES),
+                        **_feat2dict(features, USER_AUTHOR_WINDOW_COLS),
                     }
                     for (user_id, author_id), (dt, features) in self.latest[
                         "ua"
@@ -199,8 +207,8 @@ class OnlineStoreSink(ReplaySink):
                     {
                         "video_id": video_id,
                         "dt": dt,
-                        **_feat2dict(features, VIDEO_FEATURES_FLOAT),
-                        **_feat2dict(video_cum, VIDEO_FEATURES_INT),
+                        **_feat2dict(features, VIDEO_WINDOW_COLS),
+                        **_feat2dict(video_cum, VIDEO_CUM_COLS),
                     }
                     for video_id, (dt, features, video_cum) in self.latest[
                         "video"
@@ -223,8 +231,8 @@ class EvalSink(ReplaySink):
         self.model = model
         self.feature_source = feature_source
         self.eval_config = eval_config
-        self.binary_scores = BinaryScores(KuaiPureData.BINARY_TARGETS)
-        self.continuous_scores = ContinuousScores(KuaiPureData.CONTINUOUS_TARGETS)
+        self.binary_scores = BinaryScores(BINARY_TARGETS)
+        self.continuous_scores = ContinuousScores(CONTINUOUS_TARGETS)
 
     def on_event(self, event: NamedTuple, served: ServedFeatures):
         x = (
@@ -239,11 +247,11 @@ class EvalSink(ReplaySink):
                 video_id=event.video_id,
                 signal=x,
                 binary_targets=np.array(
-                    [getattr(event, f) for f in KuaiPureData.BINARY_TARGETS],
+                    [getattr(event, f) for f in BINARY_TARGETS],
                     dtype=np.float32,
                 ),
                 continuous_targets=np.array(
-                    [getattr(event, f) for f in KuaiPureData.CONTINUOUS_TARGETS],
+                    [getattr(event, f) for f in CONTINUOUS_TARGETS],
                     dtype=np.float32,
                 ),
             )
@@ -335,7 +343,7 @@ def replay(
                 ts=event.dt,
                 is_click=event.is_click,
                 signal=np.array(
-                    [getattr(event, f) for f in BINARY_FEATURES], dtype=np.float32
+                    [getattr(event, f) for f in BINARY_SIGNALS], dtype=np.float32
                 ),
             )
             for sink in sinks:

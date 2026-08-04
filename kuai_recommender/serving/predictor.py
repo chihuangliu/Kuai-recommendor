@@ -1,14 +1,13 @@
 import numpy as np
 import torch
 
-from kuai_recommender.data.data_pure import KuaiPureData
 from kuai_recommender.data.utils import get_bucket_size
 from kuai_recommender.features.compute import hash_to_bucket
 from kuai_recommender.features.feature_repo.store import store
-from kuai_recommender.features.schema import (
-    USER_AUTHOR_FEATURES,
-    USER_FEATURES,
-    VIDEO_FEATURES,
+from kuai_recommender.features.registry import (
+    BUCKET_COLS,
+    MODEL_CONTINUOUS,
+    get_online_refs,
 )
 from kuai_recommender.nn.multitask import MultiTaskModel
 from kuai_recommender.utils.model_dims import get_model_dims
@@ -22,24 +21,27 @@ def predict(
     features: np.ndarray | None = None,
     from_online: bool = True,
 ) -> dict[str, torch.Tensor]:
-    user_id_buckets = torch.tensor(
-        [hash_to_bucket(user_id, get_bucket_size()["user_id"]) for user_id in user_ids],
-        dtype=torch.long,
-    )
-    author_id_buckets = torch.tensor(
+    ids_by_source = {
+        "user_id": user_ids,
+        "author_id": author_ids,
+    }
+    x_cat = torch.stack(
         [
-            hash_to_bucket(author_id, get_bucket_size()["author_id"])
-            for author_id in author_ids
+            torch.tensor(
+                [
+                    hash_to_bucket(v, get_bucket_size()[c.source])
+                    for v in ids_by_source[c.source]
+                ],
+                dtype=torch.long,
+            )
+            for c in BUCKET_COLS
         ],
-        dtype=torch.long,
+        dim=1,
     )
 
-    x_cat = torch.stack([user_id_buckets, author_id_buckets], dim=1)
     if from_online:
         all_features = store.get_online_features(
-            features=[f"user_features:{f}" for f in USER_FEATURES]
-            + [f"user_author_features:{f}" for f in USER_AUTHOR_FEATURES]
-            + [f"video_features:{f}" for f in VIDEO_FEATURES],
+            features=get_online_refs(),
             entity_rows=[
                 {"user_id": int(u), "author_id": int(a), "video_id": int(v)}
                 for u, a, v in zip(user_ids, author_ids, video_ids)
@@ -47,7 +49,7 @@ def predict(
         ).to_dict()
 
         all_feature_values = []
-        for feat in KuaiPureData.CONTINUOUS_FEATURES:
+        for feat in MODEL_CONTINUOUS:
             values: list = [
                 v if v is not None else float("nan") for v in all_features[feat]
             ]

@@ -33,12 +33,20 @@ from kuai_recommender.features.compute import (
     build_user_author_source,
     build_video_source,
 )
-from kuai_recommender.features.schema import (
-    BINARY_FEATURES,
-    USER_FEATURES,
-    USER_AUTHOR_FEATURES,
-    VIDEO_FEATURES,
+from kuai_recommender.features.registry import (
+    UA,
+    USER,
+    VIDEO,
+    BINARY_SIGNALS,
+    Kind,
+    get_cols,
 )
+
+USER_FEATURES = [c.name for c in get_cols(USER, Kind.ROLLING)]
+USER_AUTHOR_FEATURES = [c.name for c in get_cols(UA, Kind.ROLLING)]
+VIDEO_FEATURES = [
+    c.name for c in get_cols(VIDEO, Kind.ROLLING) + get_cols(VIDEO, Kind.CUMULATIVE)
+]
 
 TZ = "Asia/Shanghai"
 
@@ -48,13 +56,13 @@ def _base(rows: list[dict]) -> pd.DataFrame:
 
     Each row supplies the ids it needs (user_id / author_id / video_id), a ``dt``
     date string, and optionally ``is_click``; every other binary column defaults
-    to 0 so the builders' loop over BINARY_FEATURES has real columns to read. Rows
+    to 0 so the builders' loop over BINARY_SIGNALS has real columns to read. Rows
     are shuffled so the tests prove the builders' own sort/alignment, not the
     input order, produces the result.
     """
     df = pd.DataFrame(rows)
     df["dt"] = pd.to_datetime(df["dt"]).dt.tz_localize(TZ)
-    for col in BINARY_FEATURES:
+    for col in BINARY_SIGNALS:
         if col not in df.columns:
             df[col] = 0
     return df.sample(frac=1, random_state=0).reset_index(drop=True)
@@ -89,7 +97,7 @@ def test_user_source_has_join_key_timestamp_and_only_its_features():
     )
     assert list(out.columns) == ["dt", "user_id"] + USER_FEATURES
     # every binary label produced exactly one rolling feature column
-    for col in BINARY_FEATURES:
+    for col in BINARY_SIGNALS:
         assert f"{col}_rolling_user_id" in out.columns
 
 
